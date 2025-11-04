@@ -5,12 +5,12 @@ import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import openai
-from prompts import TRAINING_PROMPT  # промпт берётся из prompts.py
+from prompts import TRAINING_PROMPT
 
 # === CONFIG ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OPENAI_KEY = os.environ["OPENAI_KEY"]
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003240182749")  # твой канал
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003240182749")  # ID канала
 SCENARIO_FILE = "scenarios.json"
 RULES_FOLDER = "rules"
 
@@ -33,9 +33,7 @@ def load_rules():
         if filename.endswith(".txt"):
             path = os.path.join(RULES_FOLDER, filename)
             with open(path, encoding="utf-8") as f:
-                content = f.read()
-                rules_data[filename] = content
-    logger.info(f"Загружено правил из {len(rules_data)} файлов из {RULES_FOLDER}")
+                rules_data[filename] = f.read()
     return rules_data
 
 RULES = load_rules()
@@ -60,18 +58,22 @@ async def ask_question(user_id, username, context: ContextTypes.DEFAULT_TYPE):
         text=f"Вопрос: {question['question']}"
     )
 
-# === Обработка сообщений ===
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
+# === Обработка сообщений в канале ===
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.channel_post is None and update.message is None:
         return
 
-    user = update.message.from_user
-    if user is None:
-        return
+    # Определяем текст и автора
+    if update.channel_post:
+        text = update.channel_post.text or ""
+        user_id = update.channel_post.sender_chat.id if update.channel_post.sender_chat else update.channel_post.from_user.id
+        username = update.channel_post.sender_chat.title if update.channel_post.sender_chat else update.channel_post.from_user.username
+    else:
+        text = update.message.text or ""
+        user_id = update.message.from_user.id
+        username = update.message.from_user.username or update.message.from_user.first_name
 
-    user_id = user.id
-    username = user.username or user.first_name
-    text = update.message.text.strip()
+    text = text.strip()
 
     # Новый вопрос
     if text.lower() == "!вопрос":
@@ -104,7 +106,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = await openai.ChatCompletion.acreate(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Ты ассистент для оценки ответов. Формат ответа:\n❌ Не совсем.\n\nКомментарий ИИ:\n<разбор>\n\nКомментарий:\n<совет>\n\nРекомендация:\n<рекомендация>\n\nУлучшенная формулировка:\n\"<правильный ответ>\""},
+                    {"role": "system", "content": "Ты ассистент для оценки ответов в Telegram-канале. Формат ответа:\n❌ Не совсем.\n\nКомментарий ИИ:\n<разбор>\n\nКомментарий:\n<совет>\n\nРекомендация:\n<рекомендация>\n\nУлучшенная формулировка:\n\"<правильный ответ>\""},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=400,
@@ -125,7 +127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === Главная точка запуска ===
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.ALL, handle_channel_post))
     logger.info("Бот запущен для канала...")
     app.run_polling()
 
