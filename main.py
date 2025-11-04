@@ -13,6 +13,7 @@ import openai
 from prompts import TRAINING_PROMPT  # промпт берётся из файла prompts.py
 
 # === CONFIG ===
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_KEY = os.environ["OPENAI_KEY"]
 openai.api_key = API_KEY
@@ -22,16 +23,20 @@ RULES_FOLDER = "rules"
 BOT_PASSWORD = "starzbot"
 
 # === STATES ===
+
 PASSWORD_STATE, TRAINING, AWAITING_ANSWER = range(3)
 
 # === LOGGER ===
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === SESSION ===
+
 session = {}
 
 # === Загрузка правил из папки rules ===
+
 def load_rules():
     rules_data = {}
     if not os.path.exists(RULES_FOLDER):
@@ -50,6 +55,7 @@ def load_rules():
 RULES = load_rules()
 
 # === Загрузка сценариев ===
+
 def load_scenarios():
     with open(SCENARIO_FILE, encoding='utf-8') as f:
         data = json.load(f)
@@ -57,6 +63,7 @@ def load_scenarios():
     return data
 
 # === Оценка ответов ИИ ===
+
 async def evaluate_answer(entry, user_answer, rules_text=""):
     question = entry["question"]
     expected_answer = entry["expected_answer"]
@@ -88,6 +95,7 @@ async def evaluate_answer(entry, user_answer, rules_text=""):
         return "error", "Ошибка при оценке ИИ. Попробуйте позже."
 
 # === /auth ===
+
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔐 Введите пароль для доступа к боту:")
     return PASSWORD_STATE
@@ -105,6 +113,7 @@ async def password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 # === /start - начало тренировки ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in session or not session[user_id].get("authenticated"):
@@ -121,6 +130,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AWAITING_ANSWER
 
 # === Функция показа следующего вопроса с кнопкой "Дальше" ===
+
 async def ask_next(update_obj):
     if isinstance(update_obj, Update):
         user_id = update_obj.effective_user.id
@@ -144,6 +154,7 @@ async def ask_next(update_obj):
     await send_func(f"Вопрос: {current['question']}", reply_markup=reply_markup)
 
 # === Обработка кнопки "Дальше" ===
+
 async def next_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -157,6 +168,7 @@ async def next_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ask_next(query)
 
 # === Обработка ответа пользователя ===
+
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -189,10 +201,14 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if evaluation_simple == "correct":
         await update.message.reply_text(f"✅ Верно!\n\nКомментарий ИИ:\n{evaluation_text}")
+        # Автоматически показать следующий вопрос
+        session[user_id]["step"] += 1
+        await ask_next(update)
     else:
         await update.message.reply_text(f"❌ Не совсем.\n\nКомментарий ИИ:\n{evaluation_text}")
 
 # === /stop — показать статистику ===
+
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     score = session.get(user_id, {}).get("score", {"correct":0,"incorrect":0})
@@ -202,6 +218,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # === /answer — показать последний правильный ответ ===
+
 async def show_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     last = session.get(user_id, {}).get("last_answered")  # <-- теперь берём last_answered
@@ -211,6 +228,7 @@ async def show_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Правильный ответ:\n{last['correct_answer']}")
 
 # === /help ===
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "/auth - авторизация\n"
@@ -222,6 +240,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # === Главная точка запуска ===
+
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
