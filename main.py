@@ -2,16 +2,16 @@ import os
 import json
 import random
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import openai
-from prompts import TRAINING_PROMPT  # Берем промпт из prompts.py
+from prompts import TRAINING_PROMPT
 
 # === CONFIG ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_KEY")
 openai.api_key = OPENAI_KEY
 
-BOT_PASSWORD = "123"
+CHANNEL_ID = -1003240182749
 RULES_FOLDER = "rules"
 SCENARIO_FILE = "scenarios.json"
 
@@ -43,77 +43,74 @@ SCENARIOS = load_scenarios()
 # === Сессии пользователей ===
 sessions = {}
 
-# === /start ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in sessions or not sessions[user_id].get("authenticated"):
-        await update.message.reply_text("Введите пароль для доступа к боту:")
-        sessions[user_id] = {"authenticated": False}
-        return
-
+# === Новый вопрос в канале ===
+async def ask_question(user_id, username, context: ContextTypes.DEFAULT_TYPE):
     question = random.choice(SCENARIOS)
-    sessions[user_id]["current_question"] = question
-    await update.message.reply_text(f"Вопрос: {question['question']}")
+    sessions[user_id] = {"current_question": question}
+    await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text=f"Вопрос: {question['question']}\n\n(ответьте через !<ваш ответ>)"
+    )
 
 # === Обработка сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username
     text = update.message.text.strip()
 
-    # Проверка пароля
-    if user_id not in sessions or not sessions[user_id].get("authenticated"):
-        if text == BOT_PASSWORD:
-            sessions[user_id]["authenticated"] = True
-            await update.message.reply_text("✅ Пароль верный! Напишите /start для получения вопроса.")
-        else:
-            await update.message.reply_text("❌ Неверный пароль. Попробуйте ещё раз.")
+    # Команда нового вопроса
+    if text.lower() == "!вопрос":
+        await ask_question(user_id, username, context)
         return
 
-    # Проверка текущего вопроса
-    current = sessions[user_id].get("current_question")
-    if not current:
-        await update.message.reply_text("Напишите /start чтобы получить вопрос.")
-        return
+    # Ответ пользователя
+    if text.startswith("!"):
+        if user_id not in sessions or "current_question" not in sessions[user_id]:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=f"@{username}, сначала напишите !вопрос чтобы получить вопрос."
+            )
+            return
 
-    # Получаем правила по категории
-    category = current.get("category", "")
-    rules_text = RULES.get(category, "")
+        user_answer = text[1:].strip()
+        current = sessions[user_id]["current_question"]
+        category = current.get("category", "")
+        rules_text = RULES.get(category, "")
 
-    # Формируем промпт для AI из prompts.py
-    user_prompt = TRAINING_PROMPT.format(
-        question=current["question"],
-        expected_answer=current["expected_answer"]
-    )
-    if rules_text:
-        user_prompt += f"\n\nПравила для оценки:\n{rules_text}"
-    user_prompt += f"\n\nОтвет пользователя:\n{text}"
-
-    try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Ты ассистент для оценки ответов. Давай выдавай оценку в формате:\n❌ Не совсем.\n\nКомментарий ИИ:\n<разбор>\n\nКомментарий:\n<совет>\n\nРекомендация:\n<рекомендация>\n\nУлучшенная формулировка:\n\"<правильный ответ>\""},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=400,
-            temperature=0
+        prompt = TRAINING_PROMPT.format(
+            question=current["question"],
+            expected_answer=current["expected_answer"]
         )
-        ai_text = response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        ai_text = f"Ошибка AI: {e}"
+        if rules_text:
+            prompt += f"\n\nПравила для оценки:\n{rules_text}"
+        prompt += f"\n\nОтвет пользователя:\n{user_answer}"
 
-    # Ответ пользователю
-    await update.message.reply_text(f"{ai_text}")
+        try:
+            response = await openai.ChatCompletion.acreate(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты ассистент для оценки ответов. Формат ответа:\n❌ Не совсем.\n\nКомментарий ИИ:\n<разбор>\n\nКомментарий:\n<совет>\n\nРекомендация:\n<рекомендация>\n\nУлучшенная формулировка:\n\"<правильный ответ>\""},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=400,
+                temperature=0
+            )
+            ai_text = response["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            ai_text = f"Ошибка AI: {e}"
 
-    # Новый вопрос
-    question = random.choice(SCENARIOS)
-    sessions[user_id]["current_question"] = question
-    await update.message.reply_text(f"Вопрос: {question['question']}")
+        # Публикуем ответ и разбор
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=f"Ответ от @{username}:\n{user_answer}\n\n{ai_text}"
+        )
+
+        # Присылаем следующий вопрос
+        await ask_question(user_id, username, context)
 
 # === Main ===
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен...")
     app.run_polling()
