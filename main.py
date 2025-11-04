@@ -6,10 +6,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from prompts import TRAINING_PROMPT
 from openai import AsyncOpenAI
 
-# === Настройки ===
-BOT_TOKEN = "ТОКЕН_ТВОЕГО_БОТА"
+# === CONFIG ===
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_KEY = os.environ["OPENAI_KEY"]
+openai.api_key = API_KEY
+
 PASSWORD = "123"
-client = AsyncOpenAI(api_key="API_КЛЮЧ_OPENAI")
 
 # === Хранилище пользователей (только в памяти) ===
 authorized_users = set()
