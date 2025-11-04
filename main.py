@@ -3,16 +3,15 @@ import os
 import random
 import json
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
-    MessageHandler, filters, ConversationHandler
+    MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 )
 
 import openai
-from prompts import TRAINING_PROMPT  # промпт берётся из файла prompts.py
+from prompts import TRAINING_PROMPT
 
-# === CONFIG ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_KEY = os.environ["OPENAI_KEY"]
 openai.api_key = API_KEY
@@ -21,17 +20,12 @@ SCENARIO_FILE = "scenarios.json"
 RULES_FOLDER = "rules"
 BOT_PASSWORD = "starzbot"
 
-# === STATES ===
 PASSWORD_STATE, AWAITING_ANSWER = range(2)
 
-# === LOGGER ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# === SESSION ===
 session = {}
 
-# === Загрузка правил из папки rules ===
 def load_rules():
     rules_data = {}
     if not os.path.exists(RULES_FOLDER):
@@ -49,14 +43,12 @@ def load_rules():
 
 RULES = load_rules()
 
-# === Загрузка сценариев ===
 def load_scenarios():
     with open(SCENARIO_FILE, encoding='utf-8') as f:
         data = json.load(f)
     random.shuffle(data)
     return data
 
-# === Оценка ответов ИИ ===
 async def evaluate_answer(entry, user_answer, rules_text=""):
     question = entry["question"]
     expected_answer = entry["expected_answer"]
@@ -86,7 +78,6 @@ async def evaluate_answer(entry, user_answer, rules_text=""):
         logger.error(f"OpenAI error: {e}")
         return "error", "Ошибка при оценке ИИ. Попробуйте позже."
 
-# === /auth ===
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔐 Введите пароль для доступа к боту:")
     return PASSWORD_STATE
@@ -94,7 +85,6 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
     user_id = update.effective_user.id
-
     if password == BOT_PASSWORD:
         session[user_id] = {"authenticated": True}
         await update.message.reply_text("✅ Пароль принят! Напишите /start для начала тренировки.")
@@ -103,7 +93,6 @@ async def password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Неверный пароль. Попробуйте /auth снова.")
         return ConversationHandler.END
 
-# === /start - начало тренировки ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in session or not session[user_id].get("authenticated"):
@@ -129,13 +118,14 @@ async def ask_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current = scenario[step]
     session[user_id]["current"] = current
-    await update.message.reply_text(f"Вопрос: {current['question']}")
 
-# === Обработка ответа пользователя ===
+    keyboard = [[InlineKeyboardButton("Дальше", callback_data="next")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"Вопрос: {current['question']}", reply_markup=reply_markup)
+
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if user_id not in session or "current" not in session[user_id]:
         await update.message.reply_text("Сначала напишите /start.")
         return
@@ -145,7 +135,6 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rules_text = RULES.get(category, "")
 
     evaluation_simple, evaluation_text = await evaluate_answer(entry, text, rules_text)
-
     if evaluation_simple == "error":
         await update.message.reply_text(evaluation_text)
         return
@@ -156,19 +145,23 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "evaluation": evaluation_simple,
         "correct_answer": entry["expected_answer"]
     }
-
     session[user_id]["score"].setdefault("correct", 0)
     session[user_id]["score"].setdefault("incorrect", 0)
     session[user_id]["score"][evaluation_simple] += 1
 
-    if evaluation_simple == "correct":
-        await update.message.reply_text(f"✅ Верно!\n\nКомментарий ИИ:\n{evaluation_text}")
-        session[user_id]["step"] += 1
-        await ask_next(update, context)
-    else:
-        await update.message.reply_text(f"❌ Не совсем.\n\nКомментарий ИИ:\n{evaluation_text}")
+    await update.message.reply_text(f"Оценка: {'✅ Верно' if evaluation_simple=='correct' else '❌ Не совсем'}\nКомментарий ИИ:\n{evaluation_text}")
 
-# === /stop — показать статистику ===
+async def next_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id not in session or "scenario" not in session[user_id]:
+        await query.edit_message_text("Сначала напишите /start.")
+        return
+
+    session[user_id]["step"] += 1
+    await ask_next(query, context)
+
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     score = session.get(user_id, {}).get("score", {"correct":0,"incorrect":0})
@@ -177,7 +170,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"❌ Неверных: {score.get('incorrect', 0)}")
     await update.message.reply_text(msg)
 
-# === /answer — показать последний правильный ответ ===
 async def show_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     last = session.get(user_id, {}).get("last")
@@ -186,18 +178,16 @@ async def show_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"Правильный ответ:\n{last['correct_answer']}")
 
-# === /help ===
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "/auth - авторизация по паролю\n"
         "/start - начать тренировку\n"
-        "/stop - остановить тренировку и показать статистику\n"
+        "/stop - показать статистику\n"
         "/answer - показать правильный ответ на последний вопрос\n"
         "/help - показать это сообщение"
     )
     await update.message.reply_text(msg)
 
-# === Запуск бота ===
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -212,6 +202,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("answer", show_correct))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process))
+    application.add_handler(CallbackQueryHandler(next_question, pattern="^next$"))
     application.add_handler(CommandHandler("help", help_command))
 
     logger.info("Бот запущен...")
