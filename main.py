@@ -1,135 +1,108 @@
-import os
 import json
 import random
-import logging
+import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-import openai
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from prompts import TRAINING_PROMPT
+from openai import AsyncOpenAI
 
-# === CONFIG ===
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OPENAI_KEY = os.environ["OPENAI_KEY"]
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003240182749")  # ID канала
-SCENARIO_FILE = "scenarios.json"
-RULES_FOLDER = "rules"
+# === Настройки ===
+BOT_TOKEN = "ТОКЕН_ТВОЕГО_БОТА"
+PASSWORD = "123"
+client = AsyncOpenAI(api_key="API_КЛЮЧ_OPENAI")
 
-openai.api_key = OPENAI_KEY
-
-# === LOGGER ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# === Сессии пользователей ===
-sessions = {}
-
-# === Загрузка правил ===
-def load_rules():
-    rules_data = {}
-    if not os.path.exists(RULES_FOLDER):
-        logger.warning(f"Папка с правилами {RULES_FOLDER} не найдена")
-        return rules_data
-    for filename in os.listdir(RULES_FOLDER):
-        if filename.endswith(".txt"):
-            path = os.path.join(RULES_FOLDER, filename)
-            with open(path, encoding="utf-8") as f:
-                rules_data[filename] = f.read()
-    return rules_data
-
-RULES = load_rules()
+# === Хранилище пользователей (только в памяти) ===
+authorized_users = set()
+current_question = {}
 
 # === Загрузка сценариев ===
-def load_scenarios():
-    with open(SCENARIO_FILE, encoding='utf-8') as f:
-        data = json.load(f)
-    random.shuffle(data)
-    return data
+with open("scenarios.json", "r", encoding="utf-8") as f:
+    scenarios = json.load(f)
 
-SCENARIOS = load_scenarios()
 
-# === Выдача следующего вопроса ===
-async def ask_question(user_id, username, context: ContextTypes.DEFAULT_TYPE):
-    question = random.choice(SCENARIOS)
-    sessions.setdefault(user_id, {})
-    sessions[user_id]["current_question"] = question
+# === Команды ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text=f"Вопрос: {question['question']}"
-    )
-
-# === Обработка сообщений в канале ===
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.channel_post is None and update.message is None:
+    if user_id not in authorized_users:
+        await update.message.reply_text("Введите пароль для входа:")
         return
 
-    # Определяем текст и автора
-    if update.channel_post:
-        text = update.channel_post.text or ""
-        user_id = update.channel_post.sender_chat.id if update.channel_post.sender_chat else update.channel_post.from_user.id
-        username = update.channel_post.sender_chat.title if update.channel_post.sender_chat else update.channel_post.from_user.username
-    else:
-        text = update.message.text or ""
-        user_id = update.message.from_user.id
-        username = update.message.from_user.username or update.message.from_user.first_name
+    question = random.choice(scenarios)
+    current_question[user_id] = question
 
-    text = text.strip()
+    await update.message.reply_text(f"Вопрос: {question['question']}")
 
-    # Новый вопрос
-    if text.lower() == "!вопрос":
-        await ask_question(user_id, username, context)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    # Проверка пароля
+    if user_id not in authorized_users:
+        if text == PASSWORD:
+            authorized_users.add(user_id)
+            await update.message.reply_text("✅ Пароль верный. Теперь введите /start для начала тренировки.")
+        else:
+            await update.message.reply_text("❌ Неверный пароль.")
         return
 
-    # Ответ пользователя
-    if text.startswith("!"):
-        if user_id not in sessions or "current_question" not in sessions[user_id]:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"@{username}, сначала напишите !вопрос чтобы получить вопрос."
-            )
-            return
+    # Проверка, есть ли активный вопрос
+    if user_id not in current_question:
+        await update.message.reply_text("Введите /start, чтобы начать тренировку.")
+        return
 
-        user_answer = text[1:].strip()
-        current = sessions[user_id]["current_question"]
-        category = current.get("category", "")
-        rules_text = RULES.get(category, "")
+    question = current_question[user_id]
+    correct_answer = question["expected_answer"]
 
-        prompt = TRAINING_PROMPT.format(
-            question=current["question"],
-            expected_answer=current["expected_answer"]
+    # Отправляем в OpenAI для проверки
+    prompt = f"""
+Ты обучаешь сотрудников саппорта. 
+Вопрос: {question['question']}
+Ожидаемый ответ: {correct_answer}
+Ответ пользователя: {text}
+
+Проанализируй и выдай ответ строго в таком стиле:
+❌ / ✅
+Комментарий ИИ:
+<оценка ответа>
+Комментарий: <объяснение>
+Рекомендация: <как улучшить>
+Улучшенная формулировка: <пример идеального ответа>
+"""
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": TRAINING_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
         )
-        if rules_text:
-            prompt += f"\n\nПравила для оценки:\n{rules_text}"
-        prompt += f"\n\nОтвет пользователя:\n{user_answer}"
 
-        try:
-            response = await openai.ChatCompletion.acreate(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Ты ассистент для оценки ответов в Telegram-канале. Формат ответа:\n❌ Не совсем.\n\nКомментарий ИИ:\n<разбор>\n\nКомментарий:\n<совет>\n\nРекомендация:\n<рекомендация>\n\nУлучшенная формулировка:\n\"<правильный ответ>\""},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=400,
-                temperature=0
-            )
-            ai_text = response["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            ai_text = f"Ошибка AI: {e}"
-
-        await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=f"Ответ от @{username}:\n{user_answer}\n\n{ai_text}"
-        )
+        ai_reply = response.choices[0].message.content.strip()
+        await update.message.reply_text(ai_reply)
 
         # Следующий вопрос
-        await ask_question(user_id, username, context)
+        await asyncio.sleep(1)
+        next_q = random.choice(scenarios)
+        current_question[user_id] = next_q
+        await update.message.reply_text(f"Следующий вопрос: {next_q['question']}")
 
-# === Главная точка запуска ===
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, handle_channel_post))
-    logger.info("Бот запущен для канала...")
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("Бот запущен...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
