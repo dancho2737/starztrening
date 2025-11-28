@@ -1,14 +1,15 @@
-from aiogram import Router, types
-from aiogram.filters import Command
+# handlers/commands.py
+from aiogram import Router, F
+from aiogram.types import Message
 
 router = Router()
 
-# Пример команды /start
-@router.message(Command("start"))
-async def start_command_handler(message: types.Message):
-    await message.answer("Привет! Я ваш бот.")
+# Обработчик команды /start
+@router.message(F.text == "/start")
+async def start_command(message: Message):
+    await message.answer("Привет! Я ваш бот. Чем могу помочь?")
 
-# Пример команды /help
-@router.message(Command("help"))
-async def help_command_handler(message: types.Message):
-    await message.answer("Вот список команд, которые я понимаю:\n/start\n/help")
+# Пример другой команды /help
+@router.message(F.text == "/help")
+async def help_command(message: Message):
+    await message.answer("Список доступных команд:\n/start - запуск бота\n/help - помощь")
