@@ -1,33 +1,37 @@
-from aiogram import Router
-from aiogram.types import Message
-import json
+from aiogram import Router, types
+from navigator.navigation_helper import get_navigation_hint
+from rule_checker.rules_helper import get_rule_answer
+from ai_responder.responder import get_answer
+
+# Считываем системный промпт
+with open("prompts/system_prompt.txt", encoding="utf-8") as f:
+    system_prompt = f.read()
 
 router = Router()
 
-# Загружаем базу данных
-with open("data/navigation.json", encoding="utf-8") as f:
-    navigation = json.load(f)
-
-with open("data/rules.json", encoding="utf-8") as f:
-    rules = json.load(f)
-
-def find_answer(user_text):
-    user_text_lower = user_text.lower()
-    
-    # Сначала ищем в навигации
-    for key, value in navigation.items():
-        if any(kw.lower() in user_text_lower for kw in value["keywords"]):
-            return value["hint"]
-    
-    # Потом ищем в правилах
-    for item in rules:
-        if any(kw.lower() in user_text_lower for kw in item["keywords"]):
-            return item["answer"]
-    
-    return "Извините, я не знаю ответ на этот вопрос. Попробуйте переформулировать."
-
 @router.message()
-async def handle_message(message: Message):
-    answer = find_answer(message.text)
-    await message.answer(answer)
+async def handle_message(message: types.Message):
+    """
+    Обрабатывает все текстовые сообщения от пользователя.
+    Логика:
+    1. Сначала ищем подсказку по навигации (navigation.json)
+    2. Потом проверяем правила сайта (rules.json)
+    3. Если ответа нет, обращаемся к AI (GPT-5-mini) с системным промптом
+    """
+    user_text = message.text
 
+    # 1. Проверяем навигацию
+    hint = get_navigation_hint(user_text)
+    if hint:
+        await message.answer(hint)
+        return
+
+    # 2. Проверяем правила
+    rule = get_rule_answer(user_text)
+    if rule:
+        await message.answer(rule)
+        return
+
+    # 3. Используем AI для формирования ответа
+    ai_response = get_answer(user_text, system_prompt)
+    await message.answer(ai_response)
