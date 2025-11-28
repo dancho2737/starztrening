@@ -22,3 +22,4 @@ async def echo_handler(message: Message):
     if message.text.startswith("/"):
         return  # Игнорируем другие команды
     await message.answer(f"Вы написали: {message.text}")
+    
