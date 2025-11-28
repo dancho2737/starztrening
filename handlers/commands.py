@@ -1,15 +1,25 @@
 # handlers/commands.py
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.types import Message
+from aiogram.filters import Command
 
 router = Router()
 
-# Обработчик команды /start
-@router.message(F.text == "/start")
-async def start_command(message: Message):
-    await message.answer("Привет! Я ваш бот. Чем могу помочь?")
+# Хендлер для команды /start
+@router.message(Command("start"))
+async def start_handler(message: Message):
+    await message.answer("Привет! Я бот на aiogram 3.x")
 
-# Пример другой команды /help
-@router.message(F.text == "/help")
-async def help_command(message: Message):
-    await message.answer("Список доступных команд:\n/start - запуск бота\n/help - помощь")
+# Пример команды /help
+@router.message(Command("help"))
+async def help_handler(message: Message):
+    await message.answer(
+        "Список команд:\n"
+        "/start - запуск бота\n"
+        "/help - показать эту справку"
+    )
+
+# Можно добавить ещё команды по аналогии
+# @router.message(Command("example"))
+# async def example_handler(message: Message):
+#     await message.answer("Это пример команды")
