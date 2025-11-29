@@ -1,23 +1,19 @@
-from aiogram import Router, types
+from aiogram import Router
+from aiogram.types import Message
+
 from navigator.navigation_helper import get_navigation_hint
 from rule_checker.rules_helper import get_rule_answer
 from ai_responder.responder import get_answer
 
-# Считываем системный промпт
-with open("prompts/system_prompt.txt", encoding="utf-8") as f:
-    system_prompt = f.read()
-
 router = Router()
 
+# Загружаем системный промпт
+with open("prompts/system_prompt.txt", encoding="utf-8") as file:
+    system_prompt = file.read()
+
+
 @router.message()
-async def handle_message(message: types.Message):
-    """
-    Обрабатывает все текстовые сообщения от пользователя.
-    Логика:
-    1. Сначала ищем подсказку по навигации (navigation.json)
-    2. Потом проверяем правила сайта (rules.json)
-    3. Если ответа нет, обращаемся к AI (GPT-5-mini) с системным промптом
-    """
+async def handle_message(message: Message):
     user_text = message.text
 
     # 1. Проверяем навигацию
@@ -32,6 +28,6 @@ async def handle_message(message: types.Message):
         await message.answer(rule)
         return
 
-    # 3. Используем AI для формирования ответа
-    ai_response = get_answer(user_text, system_prompt)
-    await message.answer(ai_response)
+    # 3. Ответ GPT
+    response = await get_answer(user_text, system_prompt)
+    await message.answer(response)
