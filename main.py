@@ -1,40 +1,29 @@
 import asyncio
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
-from aiogram.filters import Command
-from handlers import commands, messages, callbacks  # Подключаем наши хендлеры
-from config import BOT_TOKEN  # Твой токен из .env
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-# Создаём бота и диспетчер
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+from handlers.commands import router as commands_router
+from handlers.messages import router as messages_router
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+TOKEN = os.getenv("TOKEN")
+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Регистрируем обработчики
-dp.include_router(commands.router)
-dp.include_router(messages.router)
-dp.include_router(callbacks.router)
+# Подключаем все роутеры
+dp.include_router(commands_router)
+dp.include_router(messages_router)
 
-# Настройка команд в интерфейсе Telegram
-async def set_bot_commands():
-    commands_list = [
-        BotCommand(command="start", description="Запуск бота"),
-        BotCommand(command="help", description="Справка по боту"),
-        BotCommand(command="support", description="Контакты службы поддержки"),
-    ]
-    await bot.set_my_commands(commands_list)
 
-# Основной запуск
 async def main():
-    # Устанавливаем команды
-    await set_bot_commands()
+    print("Бот запущен.")
+    await dp.start_polling(bot)
 
-    # Запуск бота
-    print("Бот запущен...")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
-
