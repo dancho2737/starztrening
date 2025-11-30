@@ -1,22 +1,26 @@
+# main.py
 import asyncio
 import os
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
-from aiogram.types import Message
-
-from handlers.commands import router as commands_router
-from handlers.messages import router as messages_router
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+
+# Импорт роутеров
+from handlers.commands import router as commands_router
+from handlers.messages import router as messages_router
+
+# Загружаем переменные окружения (для локальной работы, Heroku использует свои переменные)
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
 
-if not TOKEN:
-    raise ValueError("Не найден токен бота. Установите BOT_TOKEN в Heroku или .env")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_KEY")
 
-# Создаем бот и диспетчер
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+if not BOT_TOKEN:
+    raise RuntimeError("Не найден BOT_TOKEN в переменных окружения!")
+
+# Создаём бота и диспетчер
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # Подключаем роутеры
@@ -24,10 +28,11 @@ dp.include_router(commands_router)
 dp.include_router(messages_router)
 
 async def main():
-    print("Бот запущен...")
+    print("Бот запущен. Ожидание сообщений...")
     try:
         await dp.start_polling(bot)
     finally:
+        # Корректное закрытие бота при остановке
         await bot.session.close()
 
 if __name__ == "__main__":
