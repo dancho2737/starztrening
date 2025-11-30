@@ -1,27 +1,20 @@
+# ai_responder/responder.py
 import os
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
+from openai import OpenAI
 
-load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_KEY"))
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_KEY"))
-
-
-async def get_answer(user_text: str, system_prompt: str) -> str:
+async def get_openai_answer(user_text: str) -> str:
     """
-    Асинхронный вызов GPT.
+    Генерация ответа через OpenAI
     """
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text}
-            ],
-            temperature=0.4
-        )
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты — умный Telegram помощник."},
+            {"role": "user", "content": user_text}
+        ],
+        max_tokens=200
+    )
 
-        return response.choices[0].message["content"]
-
-    except Exception as e:
-        return f"Ошибка AI: {e}"
+    return response.choices[0].message["content"]
