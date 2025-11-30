@@ -1,29 +1,21 @@
-from aiogram import Router
-from aiogram.types import CallbackQuery
+from aiogram import Router, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from ai_responder.responder import get_answer
 
 router = Router()
 
+# Обработчик нажатия на кнопку "Спросить ИИ Ассистента"
 @router.callback_query()
-async def help_callbacks(call: CallbackQuery):
-    data = call.data
-    if data == "help_profile":
-        text = "Главное меню → аватарка → Мой профиль → Личные данные."
-    elif data == "help_security":
-        text = "Настройки аккаунта → Безопасность → Смена пароля / 2FA."
-    elif data == "help_transactions":
-        text = "Настройки аккаунта → Транзакции → Депозит, Вывод, История."
-    elif data == "help_games":
-        text = "Слоты → Найдите свою игру → Поиск по названию или провайдеру."
-    elif data == "help_bonus":
-        text = "Кнопка Кешбэк, Промокоды → информация о бонусах."
-    elif data == "help_language":
-        text = "Настройки аккаунта → Изменить язык интерфейса."
-    elif data == "help_support":
-        text = "Контакты службы поддержки, правила использования сайта."
-    else:
-        text = "Выберите раздел из списка."
-
-    # Обновляем текст сообщения с той же клавиатурой
-    await call.message.edit_text(text, reply_markup=call.message.reply_markup)
-    await call.answer()
-
+async def ai_button_handler(callback: types.CallbackQuery):
+    user_text = callback.message.text  # берем текст из сообщения, на которое нажали
+    system_prompt_path = "prompts/system_prompt.txt"
+    
+    # Читаем системный промпт
+    with open(system_prompt_path, encoding="utf-8") as f:
+        system_prompt = f.read()
+    
+    # Получаем ответ от AI
+    ai_response = get_answer(user_text, system_prompt)
+    
+    await callback.message.answer(ai_response)
+    await callback.answer()  # чтобы убрать "часики" на кнопке
