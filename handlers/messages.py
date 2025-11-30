@@ -1,36 +1,32 @@
+# handlers/messages.py
 from aiogram import Router, types
-from navigator.navigation_helper import get_navigation_hint
-from rule_checker.rules_helper import get_rule_answer
 from ai_responder.responder import get_answer
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-with open("prompts/system_prompt.txt", encoding="utf-8") as f:
-    system_prompt = f.read()
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 router = Router()
 
+# Инлайн-кнопка "Спросить ИИ Ассистента"
+async def ask_ai_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton(text="Спросить ИИ Ассистента", callback_data="ask_ai"))
+    return keyboard
+
 @router.message()
-async def handle_message(message: types.Message):
-    user_text = message.text
+async def handle_user_message(message: types.Message):
+    """
+    Обработка любого текста от пользователя.
+    Отправляет сначала кнопку для уточнения, потом ответ AI.
+    """
+    # Показываем кнопку пользователю
+    keyboard = await ask_ai_keyboard()
+    await message.answer("Нажмите, чтобы спросить ИИ Ассистента:", reply_markup=keyboard)
 
-    # 1. Проверка навигации
-    hint = get_navigation_hint(user_text)
-    if hint:
-        await message.answer(hint)
-        return
-
-    # 2. Проверка правил
-    rule = get_rule_answer(user_text)
-    if rule:
-        await message.answer(rule)
-        return
-
-    # 3. Ответ от AI с кнопкой
-    ai_response = get_answer(user_text, system_prompt)
-    
-    # Создаем кнопку "Спросить ИИ Ассистента"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Спросить ИИ Ассистента", callback_data="ask_ai")]
-    ])
-    
-    await message.answer(ai_response, reply_markup=keyboard)
+@router.callback_query(lambda c: c.data == "ask_ai")
+async def handle_ai_callback(callback: types.CallbackQuery):
+    """
+    Вызывается при нажатии на кнопку "Спросить ИИ Ассистента".
+    """
+    await callback.answer()  # Убираем "часики" на кнопке
+    user_text = callback.message.text or "Привет"
+    answer = await get_answer(user_text)
+    await callback.message.answer(answer)
