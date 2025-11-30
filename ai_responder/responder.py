@@ -1,21 +1,14 @@
-# ai_responder/responder.py
 import os
-import openai
-import asyncio
+from openai import AsyncOpenAI
 
-OPENAI_KEY = os.getenv("OPENAI_KEY")
-openai.api_key = OPENAI_KEY
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_KEY"))
+
 
 async def get_answer(user_text: str) -> str:
-    """
-    Возвращает ответ AI на текст пользователя.
-    Если OpenAI не понимает вопрос, вернёт уточняющий вопрос.
-    """
-    try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": user_text}]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Произошла ошибка при запросе к AI: {e}"
+    """Ответ как оператор техподдержки"""
+    response = await client.responses.create(
+        model="gpt-4o-mini",
+        input=f"Ты оператор поддержки. Общайся человечно. Пользователь пишет: {user_text}"
+    )
+
+    return response.output_text
