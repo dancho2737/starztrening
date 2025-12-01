@@ -1,14 +1,12 @@
 import os
-from openai import AsyncOpenAI
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_KEY"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_KEY")
 
+# Настройки модели и параметры
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "400"))
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
 
-async def get_answer(user_text: str) -> str:
-    """Ответ как оператор техподдержки"""
-    response = await client.responses.create(
-        model="gpt-4o-mini",
-        input=f"Ты оператор поддержки. Общайся человечно. Пользователь пишет: {user_text}"
-    )
-
-    return response.output_text
+# Логи
+LOGS_DIR = os.getenv("LOGS_DIR", "logs")
