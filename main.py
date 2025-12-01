@@ -1,19 +1,29 @@
 import asyncio
 from aiogram import Bot, Dispatcher
-from bot.config import TOKEN
+from aiogram.types import BotCommand
+from bot.config import BOT_TOKEN
+from handlers import commands, messages, callbacks
 
-from handlers.commands import router as commands_router
-from handlers.messages import router as messages_router
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+dp = Dispatcher()
+
+def register_handlers():
+    dp.include_router(commands.router)
+    dp.include_router(messages.router)
+    dp.include_router(callbacks.router)
+
+async def on_startup():
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Запустить бота"),
+            BotCommand(command="help", description="Помощь"),
+        ]
+    )
 
 async def main():
-    bot = Bot(token=TOKEN)
-    dp = Dispatcher()
-
-    # Подключаем хендлеры
-    dp.include_router(commands_router)
-    dp.include_router(messages_router)
-
-    # Запуск
+    register_handlers()
+    await on_startup()
+    # Long polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
