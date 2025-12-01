@@ -1,8 +1,4 @@
-from aiogram import Router, types
+from aiogram import Router
 
 router = Router()
-
-
-@router.callback_query()
-async def callback_handler(callback: types.CallbackQuery):
-    await callback.answer("Кнопки пока в разработке.")
+# Пока пусто — зарезервировано под inline-кнопки в будущем.
