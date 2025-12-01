@@ -1,29 +1,38 @@
 import json
-from pathlib import Path
-from typing import List, Dict
+import os
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
-RULES_FILE = DATA_DIR / "rules.json"
+DATA_PATH = os.path.join("data", "rules.json")
 
 
-def get_rules() -> List[Dict]:
-    if not RULES_FILE.exists():
+def load_rules():
+    """Загружает rules.json."""
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        print(f"[rules_helper] Ошибка загрузки rules.json: {exc}")
         return []
-    with RULES_FILE.open("r", encoding="utf-8") as f:
-        return json.load(f)
 
 
-def find_rule_by_text(text: str) -> List[Dict]:
-    text_l = (text or "").lower()
-    rules = get_rules()
+def get_rules():
+    """Возвращает весь список правил."""
+    return load_rules()
+
+
+def find_rule_by_text(text: str):
+    """
+    Ищет правила по keywords.
+    Возвращает список правил (словарей).
+    """
+    text = text.lower().strip()
+    rules = load_rules()
     matches = []
-    for r in rules:
-        keywords = r.get("keywords", [])
+
+    for rule in rules:
+        keywords = rule.get("keywords", [])
         for kw in keywords:
-            if not kw:
-                continue
-            if kw.lower() in text_l:
-                matches.append(r)
+            if kw.lower() in text:
+                matches.append(rule)
                 break
+
     return matches
