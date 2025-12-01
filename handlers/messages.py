@@ -1,7 +1,6 @@
 import re
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Text
 
 from navigator.navigation_helper import (
     find_navigation_by_text,
@@ -31,7 +30,8 @@ YES_PATTERNS = re.compile(r"^(да|yes|ага|д|конечно|давайте|�
 NO_PATTERNS = re.compile(r"^(нет|не надо|не нужно|не)\b", flags=re.I)
 
 
-@router.message(Text(equals="🆘 Помощь"))
+# -------------------- КНОПКА ПОМОЩИ --------------------
+@router.message(F.text == "🆘 Помощь")
 async def on_help_button(message: Message):
     user_id = message.from_user.id
     sessions.set_state(user_id, "awaiting_question")
@@ -42,7 +42,8 @@ async def on_help_button(message: Message):
     )
 
 
-@router.message(Text(equals="📚 Навигация"))
+# -------------------- КНОПКА НАВИГАЦИИ --------------------
+@router.message(F.text == "📚 Навигация")
 async def on_nav_list(message: Message):
     nav = get_navigation()
     text = "<b>Разделы сайта:</b>\n\n"
@@ -52,7 +53,8 @@ async def on_nav_list(message: Message):
     await message.answer(text, reply_markup=help_keyboard())
 
 
-@router.message(Text(equals="📜 Правила"))
+# -------------------- КНОПКА ПРАВИЛ --------------------
+@router.message(F.text == "📜 Правила")
 async def on_rules_list(message: Message):
     rules = get_rules()
     text = "<b>Правила (кратко):</b>\n\n"
@@ -65,14 +67,15 @@ async def on_rules_list(message: Message):
     await message.answer(text, reply_markup=help_keyboard())
 
 
-@router.message()
+# -------------------- ОБРАБОТКА ВСЕХ ТЕКСТОВ --------------------
+@router.message(F.text)
 async def on_text(message: Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
     s = sessions.get(user_id)
     sessions.append_history(user_id, "user", text)
 
-    # If we are awaiting yes/no after answering
+    # === Блок: Да/Нет ===
     if s.get("state") == "awaiting_more":
         if NO_PATTERNS.match(text.lower()):
             sessions.set_state(user_id, "idle")
@@ -83,79 +86,75 @@ async def on_text(message: Message):
             sessions.set_state(user_id, "awaiting_question")
             await message.answer("Отлично! Что вас интересует дальше?", reply_markup=help_keyboard())
             return
-        # если непонятно — спросим уточнение
+
         await message.answer("Не понял — вы хотите задать ещё вопрос? (Да/Нет)", reply_markup=help_keyboard())
         return
 
-    # Основной поток: ищем по navigation и rules
+    # === Поиск в навигации и правилах ===
     nav_matches = find_navigation_by_text(text)
     rule_matches = find_rule_by_text(text)
 
-    # Если нашлось более одного совпадения — просим уточнить
+    # === Если несколько совпадений → уточнение ===
     if len(nav_matches) + len(rule_matches) > 1:
-        # Предложим варианты
         options = []
         for name, _ in nav_matches:
             options.append(name)
         for r in rule_matches:
-            # у правил может не быть заголовка — возьмём первые keywords
             kw = r.get("keywords", [])
             options.append(kw[0] if kw else "правило")
+
         options_text = "\n".join(f"• {o}" for o in options)
         sessions.set_state(user_id, "awaiting_clarify")
         await message.answer(
-            "Я нашёл несколько вариантов, уточните, пожалуйста, что именно вы имеете в виду:\n\n"
+            "Я нашёл несколько вариантов, уточните, пожалуйста:\n\n"
             f"{options_text}\n\n"
-            "Напишите название раздела или ключевое слово из списка.",
+            "Напишите название раздела или ключевое слово.",
             reply_markup=help_keyboard(),
         )
         return
 
-    # Если ничего не найдено — просим уточнить или предложим подсказки
+    # === Если не найдено ничего ===
     if not nav_matches and not rule_matches:
-        # Показываем варианты популярных разделов из data
         nav = get_navigation()
         sample = ", ".join(list(nav.keys())[:6]) if nav else "профиль, вывод, верификация"
         sessions.set_state(user_id, "awaiting_clarify")
         await message.answer(
-            "Не нашёл точного совпадения. Можешь уточнить вопрос? "
-            f"Примеры запросов: {sample}",
+            f"Не нашёл точного совпадения. Можешь уточнить вопрос?\nПримеры: {sample}",
             reply_markup=help_keyboard(),
         )
         return
 
-    # Если найден ровно один результат (либо из navigation, либо из rules)
-    source_text = ""
-    label = ""
+    # === Если найден один источник ===
     if nav_matches:
-        label, hint = nav_matches[0]
-        source_text = hint
+        label, source_text = nav_matches[0]
     else:
         rule = rule_matches[0]
         label = "Правило"
         source_text = rule.get("answer", "")
 
-    # Переформулируем через OpenAI
-    # Добавим в prompt короткую заметку, что источник (label) и текст source_text — единственный источник
     final_source = f"Источник ({label}):\n{source_text}"
+
+    # === Формируем ответ моделью ===
     try:
         generated = await responder.rephrase_from_source(final_source, text)
     except Exception as exc:
         generated = f"Не удалось сформировать ответ (ошибка сервиса): {exc}"
 
-    # Если модель вернула указание "Нужно уточнить" или «UNSURE» — попросим уточнение
-    if generated.lower().strip().startswith("нужно уточнить") or "уточн" in generated.lower() and len(generated) < 120:
+    # === Если модель просит уточнить ===
+    if generated.lower().strip().startswith("нужно уточнить") or \
+       ("уточн" in generated.lower() and len(generated) < 120):
+
         sessions.set_state(user_id, "awaiting_clarify")
         await message.answer(
-            "Мне нужно немного больше информации, чтобы точно ответить. Можете уточнить ваш вопрос? Например: где именно вы нажимали, что видите на экране и т.п.",
+            "Мне нужно немного больше информации. Уточни, пожалуйста, вопрос.",
             reply_markup=help_keyboard(),
         )
         return
 
-    # Отправляем сформулированный ответ
+    # === Отправляем ответ ===
     await message.answer(generated, reply_markup=help_keyboard())
     sessions.append_history(user_id, "bot", generated)
 
-    # После ответа — спрашиваем про дополнительные вопросы
+    # === Спрашиваем про дополнительные вопросы ===
     sessions.set_state(user_id, "awaiting_more")
     await message.answer("Есть ли дополнительные вопросы?", reply_markup=help_keyboard())
