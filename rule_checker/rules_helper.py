@@ -1,18 +1,29 @@
 import json
+from pathlib import Path
+from typing import List, Dict
 
-def load_rules():
-    with open("data/rules.json", encoding="utf-8") as f:
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+RULES_FILE = DATA_DIR / "rules.json"
+
+
+def get_rules() -> List[Dict]:
+    if not RULES_FILE.exists():
+        return []
+    with RULES_FILE.open("r", encoding="utf-8") as f:
         return json.load(f)
 
-rules = load_rules()
 
-
-def get_rule_answer(user_text: str) -> str | None:
-    """Поиск по rules.json"""
-    lower = user_text.lower()
-
-    for item in rules:
-        if any(kw.lower() in lower for kw in item["keywords"]):
-            return item["answer"]
-
-    return None
+def find_rule_by_text(text: str) -> List[Dict]:
+    text_l = (text or "").lower()
+    rules = get_rules()
+    matches = []
+    for r in rules:
+        keywords = r.get("keywords", [])
+        for kw in keywords:
+            if not kw:
+                continue
+            if kw.lower() in text_l:
+                matches.append(r)
+                break
+    return matches
