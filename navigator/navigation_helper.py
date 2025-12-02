@@ -1,41 +1,32 @@
 import json
 import os
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+DATA_DIR = Path("data")
+NAV_FILE = DATA_DIR / "navigation.json"
 
 
-DATA_PATH = os.path.join("data", "navigation.json")
-
-
-def load_navigation():
-    """Загружает navigation.json."""
-    try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as exc:
-        print(f"[navigation_helper] Ошибка загрузки navigation.json: {exc}")
+def get_navigation() -> Dict:
+    if not NAV_FILE.exists():
         return {}
+    with NAV_FILE.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def get_navigation():
-    """Возвращает весь JSON."""
-    return load_navigation()
-
-
-def find_navigation_by_text(text: str):
-    """
-    Ищет совпадения по keywords.
-    Возвращает список: [(название_раздела, hint), ...]
-    """
-    text = text.lower().strip()
-    nav = load_navigation()
+def find_navigation_by_text(text: str) -> List[Tuple[str, str]]:
+    text_l = (text or "").lower()
+    nav = get_navigation()
     matches = []
-
-    for name, item in nav.items():
-        keywords = item.get("keywords", [])
-        hint = item.get("hint", "")
-
+    for name, data in nav.items():
+        if not isinstance(data, dict):
+            continue
+        keywords = data.get("keywords", [])
+        hint = data.get("hint", "")
         for kw in keywords:
-            if kw.lower() in text:
+            if not kw:
+                continue
+            if kw.lower() in text_l:
                 matches.append((name, hint))
                 break
-
     return matches
