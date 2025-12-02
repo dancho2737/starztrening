@@ -1,25 +1,25 @@
-from aiogram import Router, types
+from aiogram import Router
+from aiogram.types import Message
 from aiogram.filters import Command
 
 router = Router()
 
+
 @router.message(Command("start"))
-async def start_cmd(msg: types.Message):
+async def cmd_start(msg: Message):
     await msg.answer(
-        "👋 Привет! Я — помощник.\n\n"
-        "Нажми кнопку <b>Помощь</b> или просто напиши вопрос.",
-        reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="Помощь")]],
-            resize_keyboard=True
-        )
+        "<b>Добро пожаловать!</b> 👋\n\n"
+        "Я — ваш персональный помощник.\n"
+        "Просто отправьте сообщение, и я постараюсь помочь — "
+        "от ответов на вопросы до подсказок по любым темам."
     )
 
+
 @router.message(Command("help"))
-async def help_cmd(msg: types.Message):
+async def cmd_help(msg: Message):
     await msg.answer(
-        "Напиши любой вопрос, и я помогу 😊",
-        reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="Помощь")]],
-            resize_keyboard=True
-        )
+        "<b>Доступные команды:</b>\n"
+        "• /start — начать работу с ботом\n"
+        "• /help — справка\n\n"
+        "Я понимаю обычный текст — просто напишите ваш вопрос."
     )
