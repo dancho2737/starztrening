@@ -1,19 +1,24 @@
-from aiogram import Router, types
-from ai_responder.responder import ask_ai, sessions
+from aiogram import Router
+from aiogram.types import Message
+from bot.config import OPENAI_API_KEY, OPENAI_MODEL
+from openai import OpenAI
 
 router = Router()
+client = OpenAI(api_key=OPENAI_API_KEY)
+
 
 @router.message()
-async def user_message(msg: types.Message):
-    user_id = msg.from_user.id
-    text = msg.text.strip()
+async def handle_message(msg: Message):
+    try:
+        # Генерация текста через OpenAI Responses API
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=msg.text
+        )
 
-    # Записываем вопрос в историю
-    sessions.append_history(user_id, "user", text)
+        ai_answer = response.output_text
 
-    ai_answer = await ask_ai(user_id, text)
+        await msg.answer(ai_answer)
 
-    # Запись ответа в историю
-    sessions.append_history(user_id, "assistant", ai_answer)
-
-    await msg.answer(ai_answer)
+    except Exception as e:
+        await msg.answer(f"Ошибка генерации ответа: {e}")
