@@ -5,14 +5,11 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# API
+# OpenAI ключ (поддерживает оба варианта)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY")
 
-# MODEL — только gpt-5.1-mini или gpt-4.1-mini
+# Модель – обязательно 4o-mini
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# ❗ Temperature — всегда 1, иначе будет ошибка
-OPENAI_TEMPERATURE = 1
-
-# Logs
+# Температура всегда = 1 (ограничение модели)
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")
