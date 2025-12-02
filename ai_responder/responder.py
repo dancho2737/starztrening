@@ -13,11 +13,7 @@ from bot.config import OPENAI_API_KEY, OPENAI_MODEL, LOGS_DIR
 #  INIT
 # ==============================
 
-_client_kwargs = {}
-if OPENAI_API_KEY:
-    _client_kwargs["api_key"] = OPENAI_API_KEY
-
-client = OpenAI(**_client_kwargs)
+client = OpenAI(api_key=OPENAI_API_KEY)
 executor = ThreadPoolExecutor()
 
 Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
@@ -124,7 +120,6 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
 # ==============================
 
 def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
-    # Если ничего не найдено
     if not knowledge:
         return (
             "Пока не вижу точной информации по этому вопросу в правилах или навигации. "
@@ -146,17 +141,16 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL
+#  OPENAI CALL (NEW API)
 # ==============================
 
 def _sync_chat_call(messages):
-    resp = client.chat.completions.create(
+    resp = client.responses.create(
         model=OPENAI_MODEL,
         messages=messages,
-        # ВНИМАНИЕ: для 4o-mini температура всегда = 1 (обязательное ограничение)
         temperature=1,
     )
-    return resp.choices[0].message.content
+    return resp.output_text
 
 
 async def ask_ai(user_id: int, question: str):
@@ -164,13 +158,12 @@ async def ask_ai(user_id: int, question: str):
     knowledge = collect_relevant_knowledge(question)
     base_answer = build_response(knowledge, question)
 
-    # Собираем историю + system + финальный user
     system_prompt = (
         "Ты — дружелюбный помощник поддержки. "
-        "Отвечай простым человеческим языком, без шаблонов, без канцелярита. "
-        "Если ответ взят из базы — говори естественно. "
-        "Если информации нет — мягко попроси уточнить вопрос. "
-        "Не придумывай данные, которые отсутствуют."
+        "Отвечай простым человеческим языком, без сухих формулировок. "
+        "Если информация есть в базе — отвечай по делу. "
+        "Если информации нет — предложи уточнить. "
+        "Не придумывай данные."
     )
 
     msgs = [{"role": "system", "content": system_prompt}]
