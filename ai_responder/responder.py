@@ -123,7 +123,7 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
     if not knowledge:
         return (
             "Пока не вижу точной информации по этому вопросу в правилах или навигации. "
-            "Но я на связи — уточни, пожалуйста, что именно ты хочешь узнать, и я помогу."
+            "Но я рядом — уточни, пожалуйста, что именно хочешь узнать."
         )
 
     parts = []
@@ -131,7 +131,8 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
     for item in knowledge:
         if item["type"] == "navigation":
             parts.append(
-                f"🔹 *{item['name'].capitalize()}*\n{item['hint']}"
+                f"🔹 *{item['name'].capitalize()}*\n"
+                f"{item['hint']}"
             )
         elif item["type"] == "rule":
             parts.append(item["answer"])
@@ -140,39 +141,58 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL (NEW API, FIXED)
+#  OPENAI CALL (НОВАЯ API 2025)
 # ==============================
 
 def _sync_chat_call(messages):
-    resp = client.chat.completions.create(
+    """
+    Критически важно: новая OpenAI Responses API
+    возвращает результат в resp.output[0].content[0].text
+    """
+    resp = client.responses.create(
         model=OPENAI_MODEL,
-        messages=messages
+        messages=messages,
+        temperature=1,
     )
-    return resp.choices[0].message["content"]
 
+    try:
+        return resp.output[0].content[0].text
+    except Exception:
+        return "Не удалось получить ответ от нейросети."
+
+
+# ==============================
+#  MAIN LOGIC
+# ==============================
 
 async def ask_ai(user_id: int, question: str):
-    # Сначала ищем по базе
+    # Ищем по базе
     knowledge = collect_relevant_knowledge(question)
     base_answer = build_response(knowledge, question)
 
+    # Системная инструкция
     system_prompt = (
         "Ты — дружелюбный помощник поддержки. "
-        "Отвечай естественно, живым человеческим языком. "
+        "Отвечай внятно, спокойно, по-человечески. "
+        "Не используй шаблонные фразы. "
         "Если информация есть в базе — используй её. "
-        "Если нет — попроси уточнить вопрос. "
-        "Не выдумывай лишнего."
+        "Если нет — мягко попроси уточнить вопрос."
     )
 
+    # Собираем историю диалога
     msgs = [{"role": "system", "content": system_prompt}]
     msgs += sessions.get_messages(user_id)
     msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
 
-
+    # Асинхронный вызов OpenAI (через executor)
     loop = asyncio.get_running_loop()
     try:
         ai_answer = await loop.run_in_executor(executor, _sync_chat_call, msgs)
     except Exception as e:
         return f"Ошибка генерации ответа: {e}"
+
+    # Сохраняем в историю
+    sessions.append_history(user_id, "user", question)
+    sessions.append_history(user_id, "assistant", ai_answer)
 
     return ai_answer
