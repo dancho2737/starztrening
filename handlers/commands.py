@@ -1,20 +1,25 @@
-from aiogram import Router
+from aiogram import Router, types
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 router = Router()
 
-
-def main_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🆘 Помощь")]],
-        resize_keyboard=True
+@router.message(Command("start"))
+async def start_cmd(msg: types.Message):
+    await msg.answer(
+        "👋 Привет! Я — помощник.\n\n"
+        "Нажми кнопку <b>Помощь</b> или просто напиши вопрос.",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="Помощь")]],
+            resize_keyboard=True
+        )
     )
 
-
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! Я ваш помощник. Нажмите «🆘 Помощь», чтобы начать.",
-        reply_markup=main_kb()
+@router.message(Command("help"))
+async def help_cmd(msg: types.Message):
+    await msg.answer(
+        "Напиши любой вопрос, и я помогу 😊",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="Помощь")]],
+            resize_keyboard=True
+        )
     )
