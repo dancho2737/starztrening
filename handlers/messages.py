@@ -15,14 +15,16 @@ async def handle_message(msg: Message):
         return await msg.answer("Пожалуйста, отправьте текстовое сообщение.")
 
     try:
-        # Отправляем запрос в OpenAI
-        response = client.responses.create(
+        # 🔥 Новый правильный вызов OpenAI (chat.completions)
+        response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            input=user_text
+            messages=[
+                {"role": "user", "content": user_text}
+            ],
+            temperature=1
         )
 
-        # Всегда безопасно вытаскиваем ответ
-        ai_answer = response.output_text or "Не удалось получить ответ."
+        ai_answer = response.choices[0].message.content
 
         await msg.answer(ai_answer)
 
