@@ -38,6 +38,7 @@ class SessionManager:
 
     def get_messages(self, user_id: int):
         s = self.get(user_id)
+        # OpenAI chat API принимает только {role, content}
         return [{"role": m["role"], "content": m["content"]} for m in s["history"]]
 
     def _write_log(self, user_id: int, entry: dict):
@@ -86,10 +87,9 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
     user_question = normalize(user_question)
     results = []
 
-    # -------- NAVIGATION --------
+    # NAVIGATION
     for name, entry in navigation_data.items():
-        keywords = entry.get("keywords", [])
-        for kw in keywords:
+        for kw in entry.get("keywords", []):
             if normalize(kw) in user_question:
                 results.append({
                     "type": "navigation",
@@ -98,13 +98,11 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
                 })
                 break
 
-    # -------- RULES --------
+    # RULES
     for rule in rules_data:
         if not isinstance(rule, dict):
             continue
-
-        keywords = rule.get("keywords", [])
-        for kw in keywords:
+        for kw in rule.get("keywords", []):
             if normalize(kw) in user_question:
                 results.append({
                     "type": "rule",
@@ -116,14 +114,14 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
 
 
 # ==============================
-#  HUMANIZED RESPONSE BUILDER
+#  HUMANIZED RESPONSES
 # ==============================
 
 def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
     if not knowledge:
         return (
-            "Пока не вижу точной информации по этому вопросу в правилах или навигации. "
-            "Но я рядом — уточни, пожалуйста, что именно хочешь узнать."
+            "⛔ Сейчас нет точной информации по этому вопросу. "
+            "Если уточнишь подробнее — я помогу."
         )
 
     parts = []
@@ -131,7 +129,7 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
     for item in knowledge:
         if item["type"] == "navigation":
             parts.append(
-                f"🔹 *{item['name'].capitalize()}*\n"
+                f"🔹 <b>{item['name'].capitalize()}</b>\n"
                 f"{item['hint']}"
             )
         elif item["type"] == "rule":
@@ -141,57 +139,51 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL (НОВАЯ API 2025)
+#  OPENAI CALL (СОВМЕСТИМОСТЬ С HEROKU)
 # ==============================
 
 def _sync_chat_call(messages):
-    """
-    Критически важно: новая OpenAI Responses API
-    возвращает результат в resp.output[0].content[0].text
-    """
-    resp = client.responses.create(
+    """Стабильный вызов OpenAI, работает на Heroku"""
+    response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         temperature=1,
     )
 
-    try:
-        return resp.output[0].content[0].text
-    except Exception:
-        return "Не удалось получить ответ от нейросети."
+    # Всегда корректно достаём текст
+    return response.choices[0].message["content"]
 
 
 # ==============================
-#  MAIN LOGIC
+#  MAIN RESPONSE LOGIC
 # ==============================
 
 async def ask_ai(user_id: int, question: str):
-    # Ищем по базе
+    # Поиск в навигации/правилах
     knowledge = collect_relevant_knowledge(question)
     base_answer = build_response(knowledge, question)
 
-    # Системная инструкция
     system_prompt = (
-        "Ты — дружелюбный помощник поддержки. "
-        "Отвечай внятно, спокойно, по-человечески. "
-        "Не используй шаблонные фразы. "
-        "Если информация есть в базе — используй её. "
-        "Если нет — мягко попроси уточнить вопрос."
+        "Ты — дружелюбный помощник поддержки казино и беттинга. "
+        "Отвечай простым живым языком, по-человечески. "
+        "Опирайся на правила и навигацию, не выдумывай данных. "
+        "Если информации нет — попроси уточнить."
     )
 
-    # Собираем историю диалога
     msgs = [{"role": "system", "content": system_prompt}]
     msgs += sessions.get_messages(user_id)
-    msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
+    msgs.append({
+        "role": "user",
+        "content": f"Вопрос: {question}\nДанные из базы: {base_answer}"
+    })
 
-    # Асинхронный вызов OpenAI (через executor)
     loop = asyncio.get_running_loop()
     try:
         ai_answer = await loop.run_in_executor(executor, _sync_chat_call, msgs)
     except Exception as e:
-        return f"Ошибка генерации ответа: {e}"
+        return f"⚠️ Ошибка генерации ответа: {e}"
 
-    # Сохраняем в историю
+    # Логируем
     sessions.append_history(user_id, "user", question)
     sessions.append_history(user_id, "assistant", ai_answer)
 
