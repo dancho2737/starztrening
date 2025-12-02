@@ -131,8 +131,7 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
     for item in knowledge:
         if item["type"] == "navigation":
             parts.append(
-                f"🔹 *{item['name'].capitalize()}*\n"
-                f"{item['hint']}"
+                f"🔹 *{item['name'].capitalize()}*\n{item['hint']}"
             )
         elif item["type"] == "rule":
             parts.append(item["answer"])
@@ -141,16 +140,15 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL (NEW API)
+#  OPENAI CALL (NEW API, FIXED)
 # ==============================
 
 def _sync_chat_call(messages):
-    resp = client.responses.create(
+    resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        messages=messages,
-        temperature=1,
+        messages=messages
     )
-    return resp.output_text
+    return resp.choices[0].message["content"]
 
 
 async def ask_ai(user_id: int, question: str):
@@ -160,15 +158,16 @@ async def ask_ai(user_id: int, question: str):
 
     system_prompt = (
         "Ты — дружелюбный помощник поддержки. "
-        "Отвечай простым человеческим языком, без сухих формулировок. "
-        "Если информация есть в базе — отвечай по делу. "
-        "Если информации нет — предложи уточнить. "
-        "Не придумывай данные."
+        "Отвечай естественно, живым человеческим языком. "
+        "Если информация есть в базе — используй её. "
+        "Если нет — попроси уточнить вопрос. "
+        "Не выдумывай лишнего."
     )
 
     msgs = [{"role": "system", "content": system_prompt}]
     msgs += sessions.get_messages(user_id)
     msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
+
 
     loop = asyncio.get_running_loop()
     try:
