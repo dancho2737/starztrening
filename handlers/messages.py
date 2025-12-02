@@ -2,162 +2,103 @@ import re
 from aiogram import Router
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
-from navigator.navigation_helper import (
-    find_navigation_by_text,
-    get_navigation,
-)
-from rule_checker.rules_helper import find_rule_by_text, get_rules
-from ai_responder.responder import sessions, responder
+from navigator.navigation_helper import find_navigation_by_text, get_navigation
+from rule_checker.rules_helper import find_rule_by_text
+from ai_responder.responder import sessions, ask_model
+
+from bot.config import OPENAI_MODEL
 
 router = Router()
 
-# --- Клавиатуры ---
+# клавиатура — только одна кнопка Помощь
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🆘 Помощь")],
-            [KeyboardButton(text="📚 Навигация"), KeyboardButton(text="📜 Правила")],
-        ],
-        resize_keyboard=True,
+        keyboard=[[KeyboardButton(text="🆘 Помощь")]],
+        resize_keyboard=True
     )
 
-def help_keyboard() -> ReplyKeyboardMarkup:
-    return main_keyboard()
+YES = re.compile(r"^(да|yes|ага|конечно)\b", flags=re.I)
+NO = re.compile(r"^(нет|не|no)\b", flags=re.I)
 
 
-# --- Паттерны для Да/Нет ---
-YES_PATTERNS = re.compile(r"^(да|yes|ага|д|конечно|давайте|хочу)\b", flags=re.I)
-NO_PATTERNS = re.compile(r"^(нет|не надо|не нужно|не)\b", flags=re.I)
+SYSTEM_PROMPT = (
+    "Ты — дружелюбный и внимательный помощник. Отвечай по-русски, коротко и понятно. "
+    "В ответах используй ТОЛЬКО информацию, предоставленную в SOURCE. "
+    "Если SOURCE не покрывает вопрос — попроси уточнить. "
+    "Если нужно перечислить шаги, делай их пронумерованными. "
+    "Всегда завершай ответ коротким вопросом: 'Есть ли ещё вопросы?'"
+)
 
-
-# ==============================
-#     ОБРАБОТЧИКИ КНОПОК
-# ==============================
 
 @router.message(lambda m: m.text == "🆘 Помощь")
-async def on_help_button(message: Message):
+async def on_help(message: Message):
     user_id = message.from_user.id
     sessions.set_state(user_id, "awaiting_question")
-    sessions.append_history(user_id, "user", "clicked_help")
-
+    sessions.append_history(user_id, "system", "user opened help")
     await message.answer(
-        "Привет! Я помогу вам разобраться с разделами сайта. Что вас интересует? "
-        "Например: профиль, вывод средств, бонусы, верификация.",
-        reply_markup=help_keyboard(),
+        "Привет! Чем могу помочь? Опиши коротко свой вопрос (например: 'где вывод', 'профиль').",
+        reply_markup=main_keyboard()
     )
 
 
-@router.message(lambda m: m.text == "📚 Навигация")
-async def on_nav_list(message: Message):
-    nav = get_navigation()
-
-    text = "<b>Доступные разделы навигации:</b>\n\n"
-    for name in nav.keys():
-        text += f"🔹 <b>{name}</b>\n"
-
-    text += "\nНапишите ключевое слово, и я подскажу путь."
-
-    await message.answer(text, reply_markup=help_keyboard())
-
-
-@router.message(lambda m: m.text == "📜 Правила")
-async def on_rules_list(message: Message):
-    rules = get_rules()
-
-    text = "<b>Основные правила:</b>\n\n"
-    for i, r in enumerate(rules, start=1):
-        ans = r.get("answer", "")
-        text += f"{i}. {ans[:100]}{'...' if len(ans) > 100 else ''}\n"
-        if i >= 10:
-            break
-
-    text += "\nНапишите ключевое слово, чтобы получить полное правило."
-
-    await message.answer(text, reply_markup=help_keyboard())
-
-
-# ==============================
-#       ГЛАВНЫЙ ОБРАБОТЧИК
-# ==============================
-
 @router.message()
-async def handle_message(message: Message):
+async def handle_all(message: Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
-    
     s = sessions.get(user_id)
     sessions.append_history(user_id, "user", text)
 
-    state = s.get("state")
+    state = s.get("state", "idle")
 
-    # ------------------------------
-    # Состояние: ждём ответ Да/Нет
-    # ------------------------------
+    # Если ожидаем подтверждение после ответа
     if state == "awaiting_more":
-        if NO_PATTERNS.match(text.lower()):
+        if NO.match(text):
             sessions.set_state(user_id, "idle")
-            sessions.append_history(user_id, "bot", "goodbye")
-            await message.answer("Хорошо! Если потребуется помощь — просто нажмите кнопку «Помощь». 👋", 
-                                 reply_markup=main_keyboard())
+            sessions.append_history(user_id, "assistant", "goodbye")
+            await message.answer("Спасибо! Обращайтесь, если что — нажмите «Помощь».", reply_markup=main_keyboard())
             return
-
-        if YES_PATTERNS.match(text.lower()):
+        if YES.match(text):
             sessions.set_state(user_id, "awaiting_question")
-            await message.answer("Отлично! Сформулируйте ваш новый вопрос.", reply_markup=help_keyboard())
+            await message.answer("Окей. Задайте следующий вопрос.", reply_markup=main_keyboard())
             return
-
-        # если непонятно
-        await message.answer(
-            "Не совсем понял. Вы хотите задать ещё один вопрос? (Да/Нет)",
-            reply_markup=help_keyboard()
-        )
+        await message.answer("Пожалуйста, ответьте 'да' или 'нет'.", reply_markup=main_keyboard())
         return
 
-    # ------------------------------
-    # Основной поток поиска данных
-    # ------------------------------
-
+    # Поиск в данных
     nav_matches = find_navigation_by_text(text)
     rule_matches = find_rule_by_text(text)
 
-    total_matches = len(nav_matches) + len(rule_matches)
+    total = len(nav_matches) + len(rule_matches)
 
-    # --- если совпадений больше одного — просим уточнить ---
-    if total_matches > 1:
-        options = []
-
-        for name, _ in nav_matches:
-            options.append(f"• {name}")
-
-        for r in rule_matches:
-            kw = r.get("keywords", [])
-            options.append(f"• {kw[0] if kw else 'правило'}")
-
-        sessions.set_state(user_id, "awaiting_clarify")
-
-        await message.answer(
-            "Я нашёл несколько вариантов по вашему запросу. "
-            "Уточните, пожалуйста, что именно вы имели в виду:\n\n" +
-            "\n".join(options),
-            reply_markup=help_keyboard()
-        )
-        return
-
-    # --- если ничего не нашли — просим уточнить ---
-    if total_matches == 0:
+    if total == 0:
+        # не нашлось — даём дружелюбный follow-up и подсказки
         nav = get_navigation()
         sample = ", ".join(list(nav.keys())[:6]) if nav else "профиль, вывод, верификация"
-
         sessions.set_state(user_id, "awaiting_clarify")
-
         await message.answer(
-            f"Похоже, я не нашёл точного совпадения. Попробуйте уточнить вопрос.\n"
-            f"Популярные запросы: {sample}",
-            reply_markup=help_keyboard()
+            f"Извините, я не уверен, что понял. Можете уточнить запрос? Примеры: {sample}",
+            reply_markup=main_keyboard()
         )
         return
 
-    # --- найдено ровно 1 совпадение ---
+    if total > 1:
+        # несколько совпадений — предложим варианты
+        options = []
+        for name, _ in nav_matches:
+            options.append(name)
+        for r in rule_matches:
+            kw = r.get("keywords", [])
+            options.append(kw[0] if kw else "правило")
+        sessions.set_state(user_id, "awaiting_clarify")
+        options_text = "\n".join(f"• {o}" for o in options)
+        await message.answer(
+            "Я нашёл несколько вариантов, уточните, пожалуйста:\n\n" + options_text + "\n\n"
+            "Напишите точное название или ключевое слово из списка.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    # ровно 1 совпадение → формируем SOURCE
     if nav_matches:
         label, hint = nav_matches[0]
         source_text = hint
@@ -166,30 +107,26 @@ async def handle_message(message: Message):
         label = "Правило"
         source_text = rule.get("answer", "")
 
-    final_source = f"Источник ({label}):\n{source_text}"
-
-    # ------------------------------
-    # Вызываем GPT через responder()
-    # ------------------------------
+    # вызываем модель чтобы переформулировать source → человеческий ответ
     try:
-        generated = await responder(
-            user_id=user_id,
-            source=final_source,
-            question=text
-        )
+        answer = await ask_model(user_id=user_id, system_prompt=SYSTEM_PROMPT, source=source_text, user_question=text)
     except Exception as exc:
-        generated = f"Не удалось сформировать ответ (ошибка сервиса): {exc}"
+        answer = f"Ошибка при генерации ответа: {exc}"
 
-    # ------------------------------
-    # Отправляем ответ
-    # ------------------------------
-    sessions.append_history(user_id, "bot", generated)
+    # Если модель вернула сообщение с просьбой уточнить — переводим в состояние уточнения
+    low = (answer or "").lower()
+    if low.startswith("нужно уточнить") or "уточн" in low and len(low) < 120:
+        sessions.set_state(user_id, "awaiting_clarify")
+        await message.answer(
+            "Мне нужно немного больше деталей, чтобы ответить. Можете уточнить: где именно вы нажали / что видите?",
+            reply_markup=main_keyboard()
+        )
+        return
 
-    await message.answer(generated, reply_markup=help_keyboard())
+    # Отправляем ответ и спрашиваем про дополнительные вопросы (модель сама должна добавлять вопрос, но дублируем)
+    sessions.append_history(user_id, "assistant", answer)
+    await message.answer(answer, reply_markup=main_keyboard())
 
-    # ------------------------------
-    # Спрашиваем о дополнительных вопросах
-    # ------------------------------
     sessions.set_state(user_id, "awaiting_more")
-
-    await message.answer("Хотите задать дополнительный вопрос?", reply_markup=help_keyboard())
+    # если модель уже спросила "Есть ли ещё вопросы?" — не дублируем, но safe to ask:
+    await message.answer("Есть ли дополнительные вопросы?", reply_markup=main_keyboard())
