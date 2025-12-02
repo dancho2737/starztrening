@@ -2,18 +2,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 
-
-# Инициализация клиента
-# На Heroku должна быть переменная окружения: OPENAI_API_KEY
 client = OpenAI()
 
-# Пул потоков для синхронных запросов (OpenAI клиент синхронный)
 executor = ThreadPoolExecutor()
 
 
-# -----------------------------------------------------------
-# Управление сессиями пользователей
-# -----------------------------------------------------------
 class SessionManager:
     def __init__(self):
         self.sessions = {}
@@ -21,92 +14,61 @@ class SessionManager:
     def get(self, user_id):
         return self.sessions.setdefault(
             user_id,
-            {
-                "state": "idle",
-                "history": [],  # комментарии пользователя и ответы бота
-            },
+            {"history": []}
         )
 
-    def set_state(self, user_id, state):
-        self.get(user_id)["state"] = state
+    def append(self, user_id, role, text):
+        self.get(user_id)["history"].append({"role": role, "content": text})
 
-    def append_history(self, user_id, sender, text):
-        self.get(user_id)["history"].append(
-            {
-                "sender": sender,
-                "text": text,
-            }
-        )
+    def get_history(self, user_id):
+        return self.get(user_id)["history"]
 
 
 sessions = SessionManager()
 
 
-# -----------------------------------------------------------
-# СИНХРОННЫЙ вызов ChatGPT (исполняется в ThreadPool)
-# -----------------------------------------------------------
-def _sync_openai_request(prompt: str) -> str:
-    """
-    Обычный синхронный запрос к OpenAI (используется через executor)
-    """
-
+# -------- СИНХРОННЫЙ GPT-ЗАПРОС --------
+def _sync_chat(history):
     response = client.chat.completions.create(
-        model="gpt-4o-mini",   # можешь заменить на gpt-5-mini если есть доступ
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты — умный помощник сайта. "
-                    "Отвечай строго по доступным данным, без домыслов. "
-                    "Если данных недостаточно — попроси уточнить вопрос. "
-                    "Формулируй ответы естественно, как человек."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
+        model="gpt-4o-mini",
+        messages=history,
+        temperature=0.5
     )
 
-    return response.choices[0].message["content"]
+    # ИСПРАВЛЕНО!
+    return response.choices[0].message.content
 
 
-# -----------------------------------------------------------
-# АСИНХРОННАЯ обёртка для aiogram
-# -----------------------------------------------------------
-async def responder(user_id: int, source: str, question: str) -> str:
+# -------- АСИНХРОННЫЙ ИНТЕРФЕЙС --------
+async def responder(user_id: int, message: str) -> str:
     """
-    Главная функция. Её вызывает aiogram в messages.py.
-    Она:
-    • подготавливает prompt
-    • вызывает OpenAI через executor
-    • сохраняет историю диалога
+    Главная функция: полный диалог с GPT.
     """
 
-    # История пользователя (можешь использовать, если нужно)
-    sessions.append_history(user_id, "user", question)
+    # добавляем реплику пользователя в историю
+    sessions.append(user_id, "user", message)
 
-    # Формируем промпт для LLM
-    prompt = (
-        f"Вот источник информации:\n\n"
-        f"{source}\n\n"
-        f"Вопрос пользователя: {question}\n\n"
-        f"Отвечай строго по источнику. "
-        f"Если в источнике нет нужных данных — спроси уточнить вопрос. "
-        f"Пиши живым человеческим языком."
-    )
+    # собираем историю
+    history = [
+        {
+            "role": "system",
+            "content": (
+                "Ты дружелюбный и умный ассистент. "
+                "Отвечай естественно, как человек. "
+                "Помогай разбираться с вопросами, давай варианты, "
+                "уточняй если что-то непонятно."
+            ),
+        }
+    ] + sessions.get_history(user_id)
 
     loop = asyncio.get_event_loop()
 
     try:
-        result = await loop.run_in_executor(
-            executor,
-            _sync_openai_request,
-            prompt,
-        )
+        reply = await loop.run_in_executor(executor, _sync_chat, history)
     except Exception as exc:
-        return f"Ошибка при генерации ответа: {exc}"
+        reply = f"Ошибка при генерации ответа: {exc}"
 
-    # Сохраняем в историю
-    sessions.append_history(user_id, "assistant", result)
+    # сохраняем ответ ассистента
+    sessions.append(user_id, "assistant", reply)
 
-    return result
+    return reply
