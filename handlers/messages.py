@@ -1,30 +1,29 @@
 from aiogram import Router
 from aiogram.types import Message
-from bot.config import OPENAI_API_KEY, OPENAI_MODEL
-from openai import OpenAI
+
+from ai_responder.responder import ask_ai, sessions
+from bot.config import OPENAI_API_KEY
 
 router = Router()
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 @router.message()
 async def handle_message(msg: Message):
-    user_text = msg.text.strip()
+    user_id = msg.from_user.id
+    text = msg.text.strip()
 
-    if not user_text:
+    if not text:
         return await msg.answer("Пожалуйста, отправьте текстовое сообщение.")
 
     try:
-        # 🔥 Новый правильный вызов OpenAI (chat.completions)
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "user", "content": user_text}
-            ],
-            temperature=1
-        )
+        # сохраняем сообщение пользователя в историю
+        sessions.append_history(user_id, "user", text)
 
-        ai_answer = response.choices[0].message.content
+        # получаем ответ из твоего кастомного движка
+        ai_answer = await ask_ai(user_id, text)
+
+        # сохраняем ответ
+        sessions.append_history(user_id, "assistant", ai_answer)
 
         await msg.answer(ai_answer)
 
