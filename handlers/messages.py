@@ -1,43 +1,42 @@
-from aiogram import Router, types
-from aiogram.filters import Text
+from aiogram import Router, types, F
 
 from ai_responder.responder import sessions, ask_model
 
 # Router
 router = Router()
 
-# Подгружаем system_prompt
+# Загружаем системный промпт
 with open("prompts/system_prompt.txt", "r", encoding="utf-8") as f:
     SYSTEM_PROMPT = f.read()
 
 
-# -------------------------------
+# ---------------------------------
 # КНОПКА "Помощь"
-# -------------------------------
-@router.message(Text("Помощь"))
+# ---------------------------------
+@router.message(F.text == "Помощь")
 async def on_help(message: types.Message):
     user_id = message.from_user.id
 
-    # Очищаем историю диалога — новый сеанс
+    # Очищаем историю — новый диалог
     sessions.sessions[user_id] = {"history": []}
 
     await message.answer(
-        "Здравствуйте! 👋\n\nЯ готов помочь вам. Напишите, пожалуйста, ваш вопрос."
+        "Здравствуйте! 👋\n\nЯ готов помочь вам. Напишите ваш вопрос."
     )
 
 
-# -------------------------------
-# ВСЕ ТЕКСТОВЫЕ СООБЩЕНИЯ
-# -------------------------------
+# ---------------------------------
+# ОБРАБОТКА ВСЕХ СООБЩЕНИЙ
+# ---------------------------------
 @router.message()
 async def on_message(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text.strip()
 
-    # Добавляем сообщение пользователя в историю
+    # Сохраняем запрос пользователя
     sessions.append(user_id, "user", user_text)
 
-    # Генерируем ответ модели
+    # Отправляем вопрос модели
     reply = await ask_model(
         user_id=user_id,
         system_prompt=SYSTEM_PROMPT,
