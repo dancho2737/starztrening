@@ -1,127 +1,186 @@
 import asyncio
 import json
-import os
+import time
 from pathlib import Path
-from typing import List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any, List
 
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
+
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL, LOGS_DIR
 
-# OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ==============================
+#  INIT
+# ==============================
 
-# executor
+_client_kwargs = {}
+if OPENAI_API_KEY:
+    _client_kwargs["api_key"] = OPENAI_API_KEY
+
+client = OpenAI(**_client_kwargs)
 executor = ThreadPoolExecutor()
 
-# Создаем папку логов
-Path(LOGS_DIR).mkdir(exist_ok=True, parents=True)
+Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 # ==============================
-# SESSION MANAGER
+#  SESSION MANAGER
 # ==============================
+
 class SessionManager:
     def __init__(self):
         self.sessions: Dict[int, Dict[str, Any]] = {}
 
     def get(self, user_id: int) -> Dict[str, Any]:
-        return self.sessions.setdefault(user_id, {"history": []})
+        return self.sessions.setdefault(user_id, {"history": [], "last_active": time.time()})
 
-    def append(self, user_id: int, role: str, text: str):
+    def append_history(self, user_id: int, role: str, content: str):
+        entry = {"role": role, "content": content, "ts": time.time()}
         s = self.get(user_id)
-        s["history"].append({"role": role, "content": text})
+        s["history"].append(entry)
+        self._write_log(user_id, entry)
 
-    def history_messages(self, user_id: int):
-        return [
-            {"role": h["role"], "content": h["content"]}
-            for h in self.get(user_id)["history"]
-        ]
+    def get_messages(self, user_id: int):
+        s = self.get(user_id)
+        return [{"role": m["role"], "content": m["content"]} for m in s["history"]]
+
+    def _write_log(self, user_id: int, entry: dict):
+        path = Path(LOGS_DIR) / f"{user_id}.json"
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = []
+        except:
+            data = []
+
+        data.append(entry)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 sessions = SessionManager()
 
 
 # ==============================
-# LOAD JSON KNOWLEDGE BASE
+#  LOAD JSON DATABASES
 # ==============================
-def load_json_file(path: str) -> List[Dict[str, Any]]:
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
+BASE_PATH = Path("ai_responder/data")
 
-NAV_DATA = load_json_file("data/navigation.json")
-RULE_DATA = load_json_file("data/rules.json")
+try:
+    navigation_data = json.loads((BASE_PATH / "navigation.json").read_text(encoding="utf-8"))
+except:
+    navigation_data = {}
 
-
-def collect_relevant_knowledge(question: str) -> str:
-    """Найти все подходящие правила и навигацию по частичному совпадению"""
-    q_lower = question.lower()
-    collected = []
-
-    def check(entry):
-        for kw in entry.get("keywords", []):
-            if kw.lower() in q_lower:
-                return True
-        return False
-
-    for item in NAV_DATA:
-        if check(item):
-            collected.append(f"[НАВИГАЦИЯ] {item.get('answer', '')}")
-
-    for item in RULE_DATA:
-        if check(item):
-            collected.append(f"[ПРАВИЛО] {item.get('answer', '')}")
-
-    # Если нет совпадений — отправим ВСЕ (модель выберет нужное)
-    if not collected:
-        for item in NAV_DATA:
-            collected.append(f"[НАВИГАЦИЯ] {item.get('answer', '')}")
-        for item in RULE_DATA:
-            collected.append(f"[ПРАВИЛО] {item.get('answer', '')}")
-
-    return "\n".join(collected)
+try:
+    rules_data = json.loads((BASE_PATH / "rules.json").read_text(encoding="utf-8"))
+except:
+    rules_data = []
 
 
 # ==============================
-# OPENAI REQUEST
+#  KNOWLEDGE SEARCH
 # ==============================
-def sync_chat_call(messages):
-    """Синхронный вызов модели"""
+
+def normalize(text: str):
+    return text.lower().strip()
+
+
+def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
+    user_question = normalize(user_question)
+    results = []
+
+    # -------- NAVIGATION --------
+    for name, entry in navigation_data.items():
+        keywords = entry.get("keywords", [])
+        for kw in keywords:
+            if normalize(kw) in user_question:
+                results.append({
+                    "type": "navigation",
+                    "name": name,
+                    "hint": entry.get("hint", "")
+                })
+                break
+
+    # -------- RULES --------
+    for rule in rules_data:
+        if not isinstance(rule, dict):
+            continue
+
+        keywords = rule.get("keywords", [])
+        for kw in keywords:
+            if normalize(kw) in user_question:
+                results.append({
+                    "type": "rule",
+                    "answer": rule.get("answer", "")
+                })
+                break
+
+    return results
+
+
+# ==============================
+#  HUMANIZED RESPONSE BUILDER
+# ==============================
+
+def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
+    # Если ничего не найдено
+    if not knowledge:
+        return (
+            "Пока не вижу точной информации по этому вопросу в правилах или навигации. "
+            "Но я на связи — уточни, пожалуйста, что именно ты хочешь узнать, и я помогу."
+        )
+
+    parts = []
+
+    for item in knowledge:
+        if item["type"] == "navigation":
+            parts.append(
+                f"🔹 *{item['name'].capitalize()}*\n"
+                f"{item['hint']}"
+            )
+        elif item["type"] == "rule":
+            parts.append(item["answer"])
+
+    return "\n\n".join(parts)
+
+
+# ==============================
+#  OPENAI CALL
+# ==============================
+
+def _sync_chat_call(messages):
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
-        temperature=1,  # GPT-4o-mini использует только 1
+        # ВНИМАНИЕ: для 4o-mini температура всегда = 1 (обязательное ограничение)
+        temperature=1,
     )
     return resp.choices[0].message.content
 
 
-async def ask_model(user_id: int, system_prompt: str, user_question: str) -> str:
-    """Основной метод генерации ответа"""
-    history = sessions.history_messages(user_id)
-    knowledge = collect_relevant_knowledge(user_question)
+async def ask_ai(user_id: int, question: str):
+    # Сначала ищем по базе
+    knowledge = collect_relevant_knowledge(question)
+    base_answer = build_response(knowledge, question)
 
-    system_msg = {"role": "system", "content": system_prompt}
+    # Собираем историю + system + финальный user
+    system_prompt = (
+        "Ты — дружелюбный помощник поддержки. "
+        "Отвечай простым человеческим языком, без шаблонов, без канцелярита. "
+        "Если ответ взят из базы — говори естественно. "
+        "Если информации нет — мягко попроси уточнить вопрос. "
+        "Не придумывай данные, которые отсутствуют."
+    )
 
-    knowledge_msg = {
-        "role": "assistant",
-        "content": f"ИНФОРМАЦИЯ ДЛЯ ОТВЕТА:\n{knowledge}\n\nИспользуй только эти данные."
-    }
+    msgs = [{"role": "system", "content": system_prompt}]
+    msgs += sessions.get_messages(user_id)
+    msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
 
-    user_msg = {"role": "user", "content": user_question}
-
-    messages = [system_msg] + history + [knowledge_msg, user_msg]
-
+    loop = asyncio.get_running_loop()
     try:
-        loop = asyncio.get_running_loop()
-        answer = await loop.run_in_executor(executor, sync_chat_call, messages)
+        ai_answer = await loop.run_in_executor(executor, _sync_chat_call, msgs)
     except Exception as e:
-        return f"Ошибка при генерации ответа: {e}"
+        return f"Ошибка генерации ответа: {e}"
 
-    # Записываем историю
-    sessions.append(user_id, "user", user_question)
-    sessions.append(user_id, "assistant", answer)
-
-    return answer
+    return ai_answer
