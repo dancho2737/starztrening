@@ -2,78 +2,105 @@ from aiogram import Router
 from aiogram.types import Message
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
 from openai import OpenAI
+
 import json
-import os
+from pathlib import Path
 
 router = Router()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# -------------------------------
-# Загружаем данные из data/*
-# -------------------------------
-BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
+# ============================
+# ЗАГРУЗКА ФАЙЛОВ ИЗ /data
+# ============================
 
-def load_json(path):
-    try:
-        with open(os.path.join(BASE_DIR, "data", path), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+BASE_DIR = Path("ai_responder/data")
 
-navigation = load_json("navigation.json")
-rules = load_json("rules.json")
+# Navigation (list)
+try:
+    navigation = json.loads((BASE_DIR / "navigation.json").read_text(encoding="utf-8"))
+except:
+    navigation = []
 
-
-# -------------------------------
-# Формирование системного контекста
-# -------------------------------
-def build_system_prompt():
-    text = "Ты — помощник сайта. Отвечай строго по данным.\n\n"
-
-    if rules:
-        text += "Правила:\n"
-        for r in rules:
-            text += f"- {r}\n"
-
-    if navigation:
-        text += "\nНавигация сайта:\n"
-        for k, v in navigation.items():
-            text += f"- {k}: {v}\n"
-
-    return text
+# Rules (list)
+try:
+    rules = json.loads((BASE_DIR / "rules.json").read_text(encoding="utf-8"))
+except:
+    rules = []
 
 
-SYSTEM_PROMPT = build_system_prompt()
+# ============================
+# СБОР ЗНАНИЙ
+# ============================
+
+def search_knowledge(question: str):
+    q = question.lower()
+    found = []
+
+    # --- NAVIGATION ---
+    for item in navigation:
+        keywords = item.get("keywords", [])
+        for kw in keywords:
+            if kw.lower() in q:
+                found.append(f"🔹 {item['name']}:\n{item['hint']}")
+                break
+
+    # --- RULES ---
+    for rule in rules:
+        keywords = rule.get("keywords", [])
+        for kw in keywords:
+            if kw.lower() in q:
+                found.append(rule.get("answer", ""))
+                break
+
+    return "\n\n".join(found)
 
 
-# -------------------------------
-# Обработка сообщений
-# -------------------------------
+# ============================
+# SYSTEM PROMPT
+# ============================
+
+SYSTEM_PROMPT = (
+    "Ты — дружелюбный оператор поддержки пользователей. "
+    "Отвечай простым человеческим языком, без лишней воды. "
+    "Если вопрос касается инструкций навигации или правил — используй предоставленные данные. "
+    "Если данных нет — предложи уточнить. Не придумывай того, чего нет."
+)
+
+
+# ============================
+# ОБРАБОТКА СООБЩЕНИЙ
+# ============================
+
 @router.message()
 async def handle_message(msg: Message):
     user_text = msg.text.strip()
 
     if not user_text:
-        return await msg.answer("Пожалуйста, отправьте текстовое сообщение.")
+        return await msg.answer("Пожалуйста, отправьте текст.")
 
     try:
-        # Новый Responses API (это важно!)
-        response = client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text}
-            ]
+        knowledge = search_knowledge(user_text)
+        final_user_input = (
+            f"Вопрос пользователя: {user_text}\n"
+            f"Данные из базы:\n{knowledge if knowledge else 'нет совпадений'}"
         )
 
-        # Правильный способ достать текст
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": final_user_input}
+            ],
+            temperature=1,
+        )
+
         ai_answer = response.output_text or "Не удалось получить ответ."
 
         await msg.answer(ai_answer)
 
     except Exception as e:
         await msg.answer(
-            "⚠️ <b>Ошибка генерации ответа.</b>\n"
+            "⚠️ <b>Произошла ошибка при генерации ответа.</b>\n"
             f"Техническая информация: <code>{e}</code>"
         )
