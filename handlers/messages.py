@@ -9,16 +9,25 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 @router.message()
 async def handle_message(msg: Message):
+    user_text = msg.text.strip()
+
+    if not user_text:
+        return await msg.answer("Пожалуйста, отправьте текстовое сообщение.")
+
     try:
-        # Генерация текста через OpenAI Responses API
+        # Отправляем запрос в OpenAI
         response = client.responses.create(
             model=OPENAI_MODEL,
-            input=msg.text
+            input=user_text
         )
 
-        ai_answer = response.output_text
+        # Всегда безопасно вытаскиваем ответ
+        ai_answer = response.output_text or "Не удалось получить ответ."
 
         await msg.answer(ai_answer)
 
     except Exception as e:
-        await msg.answer(f"Ошибка генерации ответа: {e}")
+        await msg.answer(
+            "⚠️ <b>Произошла ошибка при генерации ответа.</b>\n"
+            f"Техническая информация: <code>{e}</code>"
+        )
