@@ -3,11 +3,11 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any, List
-
 from concurrent.futures import ThreadPoolExecutor
-from openai import OpenAI
 
+from openai import OpenAI
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL, LOGS_DIR
+
 
 # ==============================
 #  INIT
@@ -38,16 +38,12 @@ class SessionManager:
 
     def get_messages(self, user_id: int):
         s = self.get(user_id)
-        # OpenAI chat API принимает только {role, content}
         return [{"role": m["role"], "content": m["content"]} for m in s["history"]]
 
     def _write_log(self, user_id: int, entry: dict):
         path = Path(LOGS_DIR) / f"{user_id}.json"
         try:
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-            else:
-                data = []
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
         except:
             data = []
 
@@ -87,18 +83,16 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
     user_question = normalize(user_question)
     results = []
 
-    # NAVIGATION
-    for name, entry in navigation_data.items():
-        for kw in entry.get("keywords", []):
+    for item in navigation_data:
+        for kw in item.get("keywords", []):
             if normalize(kw) in user_question:
                 results.append({
                     "type": "navigation",
-                    "name": name,
-                    "hint": entry.get("hint", "")
+                    "name": item.get("name", ""),
+                    "hint": item.get("hint", "")
                 })
                 break
 
-    # RULES
     for rule in rules_data:
         if not isinstance(rule, dict):
             continue
@@ -114,7 +108,7 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
 
 
 # ==============================
-#  HUMANIZED RESPONSES
+#  HUMANIZED RESPONSE BUILDER
 # ==============================
 
 def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
@@ -139,19 +133,16 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL (СОВМЕСТИМОСТЬ С HEROKU)
+#  OPENAI CALL — НОВЫЙ API
 # ==============================
 
 def _sync_chat_call(messages):
-    """Стабильный вызов OpenAI, работает на Heroku"""
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model=OPENAI_MODEL,
         messages=messages,
         temperature=1,
     )
-
-    # Всегда корректно достаём текст
-    return response.choices[0].message["content"]
+    return response.output_text
 
 
 # ==============================
@@ -159,23 +150,19 @@ def _sync_chat_call(messages):
 # ==============================
 
 async def ask_ai(user_id: int, question: str):
-    # Поиск в навигации/правилах
     knowledge = collect_relevant_knowledge(question)
     base_answer = build_response(knowledge, question)
 
     system_prompt = (
         "Ты — дружелюбный помощник поддержки казино и беттинга. "
-        "Отвечай простым живым языком, по-человечески. "
-        "Опирайся на правила и навигацию, не выдумывай данных. "
-        "Если информации нет — попроси уточнить."
+        "Отвечай простым живым языком. "
+        "Опирайся на данные базы. Если информации нет — предложи уточнить."
     )
 
     msgs = [{"role": "system", "content": system_prompt}]
     msgs += sessions.get_messages(user_id)
-    msgs.append({
-        "role": "user",
-        "content": f"Вопрос: {question}\nДанные из базы: {base_answer}"
-    })
+    msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
+
 
     loop = asyncio.get_running_loop()
     try:
@@ -183,7 +170,6 @@ async def ask_ai(user_id: int, question: str):
     except Exception as e:
         return f"⚠️ Ошибка генерации ответа: {e}"
 
-    # Логируем
     sessions.append_history(user_id, "user", question)
     sessions.append_history(user_id, "assistant", ai_answer)
 
