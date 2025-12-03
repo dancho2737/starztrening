@@ -9,20 +9,17 @@ from pathlib import Path
 router = Router()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
 # ============================
-# ЗАГРУЗКА ФАЙЛОВ ИЗ /data
+# ЗАГРУЗКА ФАЙЛОВ
 # ============================
 
 BASE_DIR = Path("ai_responder/data")
 
-# Navigation (list)
 try:
     navigation = json.loads((BASE_DIR / "navigation.json").read_text(encoding="utf-8"))
 except:
     navigation = []
 
-# Rules (list)
 try:
     rules = json.loads((BASE_DIR / "rules.json").read_text(encoding="utf-8"))
 except:
@@ -30,25 +27,23 @@ except:
 
 
 # ============================
-# СБОР ЗНАНИЙ
+# ПОИСК ЗНАНИЙ
 # ============================
 
 def search_knowledge(question: str):
     q = question.lower()
     found = []
 
-    # --- NAVIGATION ---
+    # NAVIGATION
     for item in navigation:
-        keywords = item.get("keywords", [])
-        for kw in keywords:
+        for kw in item.get("keywords", []):
             if kw.lower() in q:
                 found.append(f"🔹 {item['name']}:\n{item['hint']}")
                 break
 
-    # --- RULES ---
+    # RULES
     for rule in rules:
-        keywords = rule.get("keywords", [])
-        for kw in keywords:
+        for kw in rule.get("keywords", []):
             if kw.lower() in q:
                 found.append(rule.get("answer", ""))
                 break
@@ -61,15 +56,15 @@ def search_knowledge(question: str):
 # ============================
 
 SYSTEM_PROMPT = (
-    "Ты — дружелюбный оператор поддержки пользователей. "
-    "Отвечай простым человеческим языком, без лишней воды. "
-    "Если вопрос касается инструкций навигации или правил — используй предоставленные данные. "
-    "Если данных нет — предложи уточнить. Не придумывай того, чего нет."
+    "Ты — дружелюбный оператор поддержки казино. "
+    "Отвечай простым и живым языком. "
+    "Используй только данные из базы, не придумывай. "
+    "Если нужной информации нет — попроси пользователя уточнить."
 )
 
 
 # ============================
-# ОБРАБОТКА СООБЩЕНИЙ
+# AI ОБРАБОТКА СООБЩЕНИЙ
 # ============================
 
 @router.message()
@@ -81,21 +76,23 @@ async def handle_message(msg: Message):
 
     try:
         knowledge = search_knowledge(user_text)
-        final_user_input = (
+
+        final_input = (
             f"Вопрос пользователя: {user_text}\n"
             f"Данные из базы:\n{knowledge if knowledge else 'нет совпадений'}"
         )
 
-        response = client.responses.create(
+        # ❗ Используем правильный API
+        response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": final_user_input}
+                {"role": "user", "content": final_input}
             ],
             temperature=1,
         )
 
-        ai_answer = response.output_text or "Не удалось получить ответ."
+        ai_answer = response.choices[0].message["content"]
 
         await msg.answer(ai_answer)
 
