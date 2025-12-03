@@ -82,7 +82,7 @@ async def handle_message(msg: Message):
             f"Данные из базы:\n{knowledge if knowledge else 'нет совпадений'}"
         )
 
-        # ❗ Используем правильный API
+        # Используем правильный API
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -92,7 +92,8 @@ async def handle_message(msg: Message):
             temperature=1,
         )
 
-        ai_answer = response.choices[0].message["content"]
+        # ❗ Правильный способ получить текст
+        ai_answer = response.choices[0].message.content
 
         await msg.answer(ai_answer)
 
