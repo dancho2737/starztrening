@@ -135,16 +135,22 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CHAT API (правильный)
+#  OPENAI CHAT API — ИСПРАВЛЕННЫЙ
 # ==============================
 
 def _sync_chat_call(messages):
+    """
+    Новый формат библиотеки openai>=1.59.0.
+    Ответ содержит объект, а не словарь.
+    """
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         temperature=1,
     )
-    return response.choices[0].message["content"]
+
+    # Правильный способ извлечения текста
+    return response.choices[0].message.content
 
 
 # ==============================
@@ -164,7 +170,6 @@ async def ask_ai(user_id: int, question: str):
     msgs = [{"role": "system", "content": system_prompt}]
     msgs += sessions.get_messages(user_id)
     msgs.append({"role": "user", "content": f"Вопрос: {question}\nДанные: {base_answer}"})
-
 
     loop = asyncio.get_running_loop()
     try:
