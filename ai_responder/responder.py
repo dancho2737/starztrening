@@ -83,16 +83,18 @@ def collect_relevant_knowledge(user_question: str) -> List[Dict[str, Any]]:
     user_question = normalize(user_question)
     results = []
 
-    for item in navigation_data:
-        for kw in item.get("keywords", []):
+    # NAVIGATION — словарь
+    for name, entry in navigation_data.items():
+        for kw in entry.get("keywords", []):
             if normalize(kw) in user_question:
                 results.append({
                     "type": "navigation",
-                    "name": item.get("name", ""),
-                    "hint": item.get("hint", "")
+                    "name": name,
+                    "hint": entry.get("hint", "")
                 })
                 break
 
+    # RULES
     for rule in rules_data:
         if not isinstance(rule, dict):
             continue
@@ -133,16 +135,16 @@ def build_response(knowledge: List[Dict[str, Any]], question: str) -> str:
 
 
 # ==============================
-#  OPENAI CALL — НОВЫЙ API
+#  OPENAI CHAT API (правильный)
 # ==============================
 
 def _sync_chat_call(messages):
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         temperature=1,
     )
-    return response.output_text
+    return response.choices[0].message["content"]
 
 
 # ==============================
