@@ -1,19 +1,19 @@
+# handlers/commands.py
 from aiogram import Router
-from aiogram.types import Message
 from aiogram.filters import Command
+from aiogram.types import Message
 
 router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🆘 Помощь")]], resize_keyboard=True)
     await msg.answer(
-        "<b>Добро пожаловать!</b>\n"
-        "Я — Dodo AI Assistant. Напишите ваш вопрос обычной фразой, например: 'Как зайти в профиль?'"
+        "<b>Добро пожаловать!</b>\nЯ — Dodo AI Assistant. Нажмите «🆘 Помощь» или просто напишите вопрос.",
+        reply_markup=kb
     )
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message):
-    await msg.answer(
-        "<b>Помощь</b>\n"
-        "Просто опишите, что вы хотите найти на сайте — бот ответит по базе данных (навигация/правила)."
-    )
+    await cmd_start(msg)
