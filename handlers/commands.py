@@ -1,23 +1,21 @@
-# handlers/commands.py
 from aiogram import Router
 from aiogram.types import Message
-from aiogram.filters import Command
+from ai_responder.responder import ask_ai, sessions
 
 router = Router()
 
-@router.message(Command("start"))
-async def cmd_start(msg: Message):
-    await msg.answer(
-        "<b>Добро пожаловать!</b>\n"
-        "Нажмите /help чтобы получить подсказки. Просто отправьте вопрос в чат — я помогу."
-    )
+@router.message()
+async def handle_message(msg: Message):
+    user_id = msg.from_user.id
+    text = (msg.text or "").strip()
+    if not text:
+        return await msg.answer("Пожалуйста, отправьте текстовое сообщение.")
 
-@router.message(Command("help"))
-async def cmd_help(msg: Message):
-    await msg.answer(
-        "<b>Помощь</b>\n"
-        "Напишите свой вопрос обычной фразой, например:\n"
-        "— Как зайти в профиль?\n"
-        "— Где вывод средств?\n\n"
-        "Я отвечаю только по информации, которая есть в базе (navigation.json и rules.json)."
-    )
+    # добавляем короткую запись в сессию (на всякий случай)
+    sessions.append_history(user_id, "user", text)
+
+    try:
+        answer = await ask_ai(user_id, text)
+        await msg.answer(answer)
+    except Exception as e:
+        await msg.answer("⚠️ Произошла ошибка при генерации ответа.\n" f"<code>{e}</code>")
