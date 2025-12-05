@@ -5,14 +5,9 @@ from aiogram.types import BotCommand
 from bot.config import BOT_TOKEN
 from handlers import messages, commands
 
-bot = Bot(
-    token=BOT_TOKEN, 
-    default=DefaultBotProperties(parse_mode="HTML")
-)
-
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Регистрируем хендлеры
 dp.include_router(commands.router)
 dp.include_router(messages.router)
 
