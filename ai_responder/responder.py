@@ -44,12 +44,28 @@ class SessionStore:
         self.pending: Dict[int, List[Dict]] = {}   # user_id -> list of options
         self.first_seen: set = set()               # чтобы поприветствовать один раз
 
-    # history
+    # history helpers (new API)
     def add_history(self, user_id: int, role: str, content: str):
         self.history.setdefault(user_id, []).append({"role": role, "content": content})
 
     def get_history(self, user_id: int):
         return self.history.get(user_id, [])
+
+    # Backwards-compatible methods used by handlers (sessions.add / get / clear)
+    def add(self, user_id: int, role: str, content: str):
+        """Compatibility: sessions.add(user_id, role, content)"""
+        return self.add_history(user_id, role, content)
+
+    def get(self, user_id: int):
+        """Compatibility: sessions.get(user_id) -> history list"""
+        return self.get_history(user_id)
+
+    def clear(self, user_id: int):
+        """Compatibility: clear all user data (history, pending, device, seen)"""
+        self.history.pop(user_id, None)
+        self.pending.pop(user_id, None)
+        self.device.pop(user_id, None)
+        self.first_seen.discard(user_id)
 
     # device
     def set_device(self, user_id: int, device: str):
@@ -81,6 +97,20 @@ class SessionStore:
 
 
 sessions = SessionStore()
+
+# Global map for handlers that import user_device
+# This is kept for backwards compatibility with older handlers that import user_device directly.
+# Prefer using sessions.set_device / sessions.get_device in new code.
+user_device: Dict[int, str] = {}
+
+# keep user_device and sessions in sync if you use both:
+def _sync_user_device_from_sessions():
+    # populate user_device from sessions.device for compatibility (on import)
+    for uid, dev in sessions.device.items():
+        user_device[uid] = dev
+
+# initially sync
+_sync_user_device_from_sessions()
 
 
 # вспомогательная функция для получения читабельного заголовка
@@ -245,10 +275,12 @@ async def ask_ai(user_id: int, question: str) -> str:
         t = q.lower()
         if any(x in t for x in ("смартфон", "телефон", "mobile", "мобил")):
             sessions.set_device(user_id, "mobile")
+            user_device[user_id] = "mobile"
             sessions.add_history(user_id, "assistant", "device_set_mobile")
             return "Отлично — переключаюсь на мобильную навигацию. Введите ваш вопрос."
         if any(x in t for x in ("компьютер", "пк", "desktop", "ноут")):
             sessions.set_device(user_id, "desktop")
+            user_device[user_id] = "desktop"
             sessions.add_history(user_id, "assistant", "device_set_desktop")
             return "Хорошо — переключаюсь на версию для компьютера. Введите ваш вопрос."
         # If user didn't select, re-ask
@@ -289,6 +321,6 @@ async def ask_ai(user_id: int, question: str) -> str:
     for i, m in enumerate(matches, start=1):
         label = "Правила" if m.get("type") == "rules" else "Раздел"
         title = m.get("title") or "(без названия)"
-        lines.append(f"{i}) {m.get('title')} ({label})")
+        lines.append(f"{i}) {title} ({label})")
     lines.append("\nНапишите номер варианта (например, 1 или 2), или слово 'раздел'/'правила', либо напишите фразу, например: 'где на сайте оформить вывод'.")
     return "\n".join(lines)
