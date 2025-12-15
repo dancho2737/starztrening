@@ -121,12 +121,56 @@ def _title_of(item: Dict, default: str) -> str:
 
 
 def search_matches(question: str, device: str) -> List[Dict]:
-    q = (question or "").lower()
-    matches: List[Dict] = []
-    if device == "mobile":
-        nav = navigation_mobile
-    else:
-        nav = navigation_desktop
+    q = question.lower().strip()
+    matches = []
+    exact_matches = []
+
+    nav = navigation_mobile if device == "mobile" else navigation_desktop
+
+    def check_item(item, item_type):
+        for kw in item.get("keywords", []):
+            kw_l = kw.lower().strip()
+
+            # 1️⃣ ТОЧНОЕ совпадение — ВЫСШИЙ ПРИОРИТЕТ
+            if q == kw_l:
+                exact_matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+
+            # 2️⃣ Вопрос длиннее, но ключевая фраза содержится внутри
+            if kw_l in q and len(kw_l) > 3:
+                matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+
+    # 🔹 Навигация
+    for item in nav:
+        check_item(item, "navigation")
+
+    # 🔹 Правила
+    for rule in rules:
+        check_item(rule, "rules")
+
+    # 🔥 ЕСЛИ ЕСТЬ ТОЧНОЕ СОВПАДЕНИЕ — ВОЗВРАЩАЕМ ТОЛЬКО ЕГО
+    if exact_matches:
+        return exact_matches
+
+    # 🧹 Удаляем дубликаты (одинаковый смысл)
+    unique = []
+    seen = set()
+    for m in matches:
+        key = (m["type"], m["value"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    return unique
 
     # навигация
     for item in nav:
