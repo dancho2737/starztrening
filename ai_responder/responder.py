@@ -346,9 +346,22 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if not matches:
         return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
 
-    if len(matches) == 1:
-        answer_text = matches[0].get("value") or "Информация отсутствует."
-        return humanize_answer(answer_text, question)
+if len(matches) == 1:
+    data = matches[0].get("value")
+
+    # ✅ Новый формат навигации: title + steps
+    if isinstance(data, dict) and "steps" in data:
+        lines = [f"Чтобы {data.get('title')}, выполните следующие шаги:"]
+        for i, step in enumerate(data["steps"], start=1):
+            lines.append(f"{i}. {step}.")
+        return "\n".join(lines)
+
+    # ✅ Старый формат (обычная строка)
+    if isinstance(data, str) and data.strip():
+        return humanize_answer(data, question)
+
+    # ✅ Защита от пустого ответа
+    return "Информация по этому вопросу временно недоступна."
 
     # multiple matches -> present options and save pending
     sessions.set_pending(user_id, matches)
