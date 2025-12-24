@@ -346,7 +346,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if not matches:
         return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
 
-    if len(matches) == 1:
+if len(matches) == 1:
     data = matches[0].get("value")
 
     # Новый формат: title + steps
