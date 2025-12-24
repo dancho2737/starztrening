@@ -1,5 +1,6 @@
 # ai_responder/responder.py
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
@@ -63,6 +64,15 @@ def format_answer(answer: Any) -> str:
 
 def normalize_text(t: str) -> str:
     return (t or "").lower().strip()
+
+
+# простая токенизация (отделяем слова, убираем короткие стоп-слова)
+def tokenize(text: str) -> List[str]:
+    text = (text or "").lower()
+    # заменим не буквенно-цифровые символы на пробелы
+    text = re.sub(r"[^\wа-яё0-9]+", " ", text, flags=re.IGNORECASE)
+    tokens = [t for t in text.split() if len(t) > 1]
+    return tokens
 
 
 # Сессии: история + выбор устройства + ожидаемые варианты
@@ -325,7 +335,7 @@ def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
     numbered = "\n".join([f"{i+1}. {c}" for i, c in enumerate(cand)])
     prompt = (
         "Ты ассистент службы поддержки. По запросу пользователя выбери НАИЛУЧШИЙ вариант "
-        "из списка. Ответь **ТОЛЬКО** числом — номер варианта (1, 2, ...) или 0 если ни один не подходит.\n\n"
+        "из списка. Ответь ТОЛЬКО числом — номер варианта (1, 2, ...) или 0 если ни один не подходит.\n\n"
         f"Запрос пользователя:\n\"{user_text}\"\n\n"
         "Варианты:\n" + numbered + "\n\n"
         "Ответ (только число):"
@@ -339,7 +349,7 @@ def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            max_tokens=10
+            max_tokens=12
         )
         if resp and getattr(resp, "choices", None):
             text = ""
@@ -351,17 +361,74 @@ def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
                 text = (choice0.text or "").strip()
             else:
                 text = str(choice0)
-            # ищем цифру в ответе
-            for token in text.replace("\n", " ").split():
+            # ищем цифру в ответе (может быть "1", "1.", "1)" и т.д.)
+            # также допускаем, что GPT может написать номер словами ("one") — но это редкость
+            # простая обработка: найти первое вхождение числа
+            for token in re.split(r"[\s\)\.]+", text):
+                token = token.strip()
                 if token.isdigit():
                     num = int(token)
                     if num == 0:
                         return None
                     if 1 <= num <= len(cand):
                         return num - 1
+            # если не нашли цифру — попытаться найти число внутри всей строки
+            m = re.search(r"\d+", text)
+            if m:
+                num = int(m.group())
+                if 1 <= num <= len(cand):
+                    return num - 1
             return None
     except Exception:
         return None
+    return None
+
+
+def simple_semantic_match(user_q: str, items: List[Dict], top_k: int = 1) -> Optional[int]:
+    """
+    Быстрый эвристический скоринг: считает пересечение токенов между запросом и candidate text
+    (title + keywords + небольшая выжимка из steps).
+    Возвращает индекс лучшего совпадения, если он достаточно явный (по порогам), иначе None.
+    Это экономит вызовы GPT и ловит большинство живых формулировок.
+    """
+    q_tokens = set(tokenize(user_q))
+    if not q_tokens:
+        return None
+
+    scores = []
+    for idx, item in enumerate(items):
+        # формируем candidate text
+        ans = item.get("answer")
+        kand = []
+        if isinstance(ans, dict):
+            kand.append(ans.get("title") or "")
+            # добавим короткую выжимку из первых шагов (если есть)
+            steps = ans.get("steps", [])
+            if steps:
+                kand.append(" ".join(steps[:2]))
+        else:
+            kand.append(str(ans or ""))
+        keywords = item.get("keywords") or []
+        kand.extend(keywords)
+        candidate_text = " ".join([k for k in kand if k])
+        cand_tokens = set(tokenize(candidate_text))
+        if not cand_tokens:
+            scores.append((idx, 0, 0.0))
+            continue
+        shared = q_tokens.intersection(cand_tokens)
+        shared_count = len(shared)
+        ratio = shared_count / (len(q_tokens) if q_tokens else 1)
+        scores.append((idx, shared_count, ratio))
+
+    # найдем лучший
+    scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    if not scores:
+        return None
+    best_idx, best_count, best_ratio = scores[0]
+
+    # пороги: явный матч — либо >=2 совпавших токена, либо 1 совпадение но при этом доля >= 0.35
+    if best_count >= 2 or (best_count >= 1 and best_ratio >= 0.35):
+        return best_idx
     return None
 
 
@@ -433,25 +500,45 @@ async def ask_ai(user_id: int, question: str) -> Any:
     device = sessions.get_device(user_id) or "desktop"
     matches = search_matches(q, device)
 
-    # 5a) если ничего не найдено по ключевым словам — пробуем GPT как intent-detector
+    # 5a) если ничего не найдено по ключевым словам — попробуем быстрый семантический матч
     if not matches:
-        # соберём candidates: titles из navigation + rules
+        nav = navigation_mobile if device == "mobile" else navigation_desktop
+        items = nav + rules
+
+        # сначала быстрый эвристический матч (локально, без OpenAI)
+        sem_idx = simple_semantic_match(q, items)
+        if sem_idx is not None:
+            selected_item = items[sem_idx]
+            answer_val = selected_item.get("answer") or "Информация отсутствует."
+            text = format_answer(answer_val)
+            if openai_client and isinstance(answer_val, str):
+                return humanize_answer(text, q)
+            return text
+
+        # если быстрый локальный матч не дал результата, пробуем GPT как детектор намерения
+        # собираем candidates: комбинируем title + keywords + краткое описание (если есть)
         candidates = []
         items_map = []  # параллельный список, чтобы вернуть объект
-        nav = navigation_mobile if device == "mobile" else navigation_desktop
-        for item in nav + rules:
-            # candidate title preference: if answer is dict and has title -> use it
+        for item in items:
             ans = item.get("answer")
+            keywords = item.get("keywords") or []
+            # candidate_text: title + keywords + short steps snippet
             if isinstance(ans, dict):
-                title = ans.get("title")
+                title = ans.get("title") or ""
+                steps = ans.get("steps", [])
+                snippet = " ".join(steps[:2]) if steps else ""
             else:
-                # fallback: title field or first keyword or _title_of
-                title = item.get("title") or (item.get("keywords") or [None])[0] or _title_of(item, "option")
-            if not title:
-                continue
-            candidates.append(str(title))
+                title = str(ans or "")
+                snippet = ""
+            candidate_text = " ".join([title] + keywords + [snippet]).strip()
+            if not candidate_text:
+                # fallback: try to use first keyword or generated title
+                fallback_title = item.get("title") or (item.get("keywords") or [None])[0] or _title_of(item, "option")
+                candidate_text = str(fallback_title)
+            candidates.append(candidate_text)
             items_map.append(item)
-        # запрос к GPT: вернёт индекс выбранного варианта или None
+
+        # вызов GPT для выбора индекса
         idx = ask_gpt_for_intent(q, candidates)
         if idx is not None and 0 <= idx < len(items_map):
             selected_item = items_map[idx]
@@ -461,6 +548,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
             if openai_client and isinstance(answer_val, str):
                 return humanize_answer(text, q)
             return text
+
         # если и GPT не помог — возвратим дефолтный ответ
         return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
 
