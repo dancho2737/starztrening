@@ -126,8 +126,8 @@ def search_matches(question: str, device: str) -> List[Dict]:
             if question.lower() == kw_l:
                 exact_matches.append(item)
                 break
-            kw_lemma = morph.parse(kw_l)[0].normal_form
-            if kw_lemma in q_lemmas:
+            kw_lemmas = normalize_text(kw_l)
+            if any(kw in q_lemmas for kw in kw_lemmas):
                 matches.append(item)
                 break
 
@@ -167,20 +167,40 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
     except Exception:
         return short_answer
 
+# --- вспомогательные функции ---
+def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
+    if not text or not options: return None
+    t = text.strip().lower()
+    map_num = {"1":0,"2":1,"3":2,"4":3,"5":4,"первый":0,"второй":1,"третий":2,"четвёртый":3,"пятый":4}
+    if t in map_num and map_num[t] < len(options): return map_num[t]
+    for i, opt in enumerate(options):
+        title = (opt.get("title") or "").lower()
+        if any(word in t for word in title.split()):
+            return i
+    return None
+
+OFF_TOPIC_KEYWORDS = ["python","код","программа","function","array","массив","счётчик","counter",
+                       "for","while","list","class","javascript","java","c++","go","rust","sql","база данных"]
+
+def is_off_topic(question: str) -> bool:
+    q = (question or "").lower()
+    return any(kw in q for kw in OFF_TOPIC_KEYWORDS)
+
 # --- ask_ai ---
 async def ask_ai(user_id: int, question: str) -> Any:
     q = (question or "").strip()
 
-    # обработка payload device
+    # --- обработка payload device ---
     if q.startswith("device:"):
         _, val = q.split(":", 1)
+        val = val.strip()
         if val in ("mobile", "desktop"):
             sessions.set_device(user_id, val)
             user_device[user_id] = val
             sessions.add_history(user_id, "assistant", f"device_set_{val}")
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
 
-    # приветствие и выбор устройства
+    # приветствие + выбор устройства
     if not sessions.was_seen(user_id):
         sessions.mark_seen(user_id)
         sessions.add_history(user_id, "assistant", "greet_asked_device")
@@ -218,13 +238,14 @@ async def ask_ai(user_id: int, question: str) -> Any:
         return humanize_answer(answer_val, question)
 
     # off-topic
-    if is_off_topic(q := question.lower()):
+    if is_off_topic(q):
         return "Извините, я могу отвечать только по вопросам сайта."
 
+    # поиск по базе
     device = sessions.get_device(user_id) or "desktop"
     matches = search_matches(q, device)
 
-    # если ничего не найдено — пробуем GPT для понимания смысла
+    # если ничего не найдено, используем GPT для понимания смысла
     if not matches and openai_client:
         prompt = f"{SYSTEM_PROMPT}\nПользователь спрашивает: «{q}». Используя данные из navigation и rules, сформулируй ответ."
         try:
@@ -267,22 +288,3 @@ async def ask_ai(user_id: int, question: str) -> Any:
         lines.append(f"{i}) {m.get('title') or '(без названия)'} ({typ})")
     lines.append("Напишите номер варианта или уточните словами.")
     return "\n".join(lines)
-
-# --- Вспомогательные функции parse_choice и is_off_topic ---
-def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
-    if not text or not options: return None
-    t = text.strip().lower()
-    map_num = {"1":0,"2":1,"3":2,"4":3,"5":4,"первый":0,"второй":1,"третий":2,"четвёртый":3,"пятый":4}
-    if t in map_num and map_num[t] < len(options): return map_num[t]
-    for i, opt in enumerate(options):
-        title = (opt.get("title") or "").lower()
-        if any(word in t for word in title.split()):
-            return i
-    return None
-
-OFF_TOPIC_KEYWORDS = ["python","код","программа","function","array","массив","счётчик","counter",
-                       "for","while","list","class","javascript","java","c++","go","rust","sql","база данных"]
-
-def is_off_topic(question: str) -> bool:
-    q = (question or "").lower()
-    return any(kw in q for kw in OFF_TOPIC_KEYWORDS)
