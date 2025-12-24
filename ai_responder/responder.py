@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
-import pymorphy2
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,16 +29,14 @@ try:
 except Exception:
     SYSTEM_PROMPT = "Ты — оператор поддержки. Отвечай строго по базе."
 
-# OpenAI клиент
+# OpenAI клиент (опционально, если нужен)
 try:
     openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 except Exception:
     openai_client = None
 
-# морфологический анализатор для лемматизации
-morph = pymorphy2.MorphAnalyzer()
 
-# --- Сессии ---
+# --- SessionStore без изменений ---
 class SessionStore:
     def __init__(self):
         self.history: Dict[int, List[Dict]] = {}
@@ -87,8 +84,9 @@ class SessionStore:
     def mark_seen(self, user_id: int):
         self.first_seen.add(user_id)
 
-    def was_seen(self, user_id: int) -> bool:
+    def was_seen(self, user_id: bool):
         return user_id in self.first_seen
+
 
 sessions = SessionStore()
 user_device: Dict[int, str] = {}
@@ -96,55 +94,121 @@ user_device: Dict[int, str] = {}
 def _sync_user_device_from_sessions():
     for uid, dev in sessions.device.items():
         user_device[uid] = dev
-
 _sync_user_device_from_sessions()
 
-# --- Утилиты ---
+
 def _title_of(item: Dict, default: str) -> str:
     t = item.get("title") or item.get("name")
     if not t:
         kws = item.get("keywords") or []
-        t = kws[0] if kws else default
+        if kws:
+            t = kws[0]
+    if not t:
+        txt = item.get("hint") or item.get("answer") or ""
+        t = (txt[:60] + "...") if txt else default
     return t
 
-def normalize_text(text: str) -> List[str]:
-    words = (text or "").lower().split()
-    return [morph.parse(w)[0].normal_form for w in words]
 
-# --- Поиск совпадений ---
+# --- Поиск без pymorphy2 ---
 def search_matches(question: str, device: str) -> List[Dict]:
-    q_lemmas = normalize_text(question)
-    nav = navigation_mobile if device == "mobile" else navigation_desktop
+    q = question.lower().strip()
     matches = []
     exact_matches = []
 
-    for item in nav + rules:
+    nav = navigation_mobile if device == "mobile" else navigation_desktop
+
+    def check_item(item, item_type):
         kws = item.get("keywords", [])
+        # если keywords пустые, будем отмечать для GPT
+        if not kws:
+            matches.append({
+                "type": item_type,
+                "title": _title_of(item, "Без названия"),
+                "value": item.get("hint") or item.get("answer", "")
+            })
+            return
+
         for kw in kws:
-            if not kw: continue
             kw_l = kw.lower().strip()
-            if question.lower() == kw_l:
-                exact_matches.append(item)
-                break
-            kw_lemmas = normalize_text(kw_l)
-            if any(kw in q_lemmas for kw in kw_lemmas):
-                matches.append(item)
-                break
+            if q == kw_l:
+                exact_matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+            if kw_l in q and len(kw_l) > 3:
+                matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+
+    for item in nav:
+        check_item(item, "navigation")
+    for rule in rules:
+        check_item(rule, "rules")
 
     if exact_matches:
-        matches = exact_matches
+        return exact_matches
 
-    # удаляем дубликаты
+    # уникальные варианты
     unique = []
     seen = set()
     for m in matches:
-        key = (m.get("type"), m.get("answer") or m.get("hint") or "")
+        key = (m["type"], m["value"])
         if key not in seen:
             seen.add(key)
             unique.append(m)
+
     return unique
 
-# --- Humanize через GPT ---
+
+# --- Остальной код parse_choice и is_off_topic без изменений ---
+def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
+    if not text or not options:
+        return None
+    t = text.strip().lower()
+
+    map_num = {
+        "1": 0, "первое": 0, "первый": 0,
+        "2": 1, "второе": 1, "второй": 1,
+        "3": 2, "третье": 2, "третий": 2,
+        "4": 3, "четвёртое": 3, "четвертое": 3, "четвёртый": 3, "четвертый": 3,
+        "5": 4, "пятое": 4, "пятый": 4
+    }
+    if t in map_num and map_num[t] < len(options):
+        return map_num[t]
+
+    for i, opt in enumerate(options):
+        title = (opt.get("title") or "").lower()
+        if title:
+            for word in title.split():
+                if word and word in t:
+                    return i
+
+    for token in t.replace(")", " ").replace(".", " ").split():
+        if token.isdigit():
+            idx = int(token) - 1
+            if 0 <= idx < len(options):
+                return idx
+    return None
+
+
+OFF_TOPIC_KEYWORDS = [
+    "python", "код", "программа", "function", "array", "массив", "счётчик", "счетчик", "counter",
+    "for", "while", "list", "class", "javascript", "java", "c++", "go", "rust", "sql", "база данных"
+]
+
+def is_off_topic(question: str) -> bool:
+    q = (question or "").lower()
+    for kw in OFF_TOPIC_KEYWORDS:
+        if kw in q:
+            return True
+    return False
+
+
 def humanize_answer(short_answer: str, user_question: str) -> str:
     if not openai_client:
         return short_answer
@@ -161,36 +225,20 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
             choice0 = resp.choices[0]
             if hasattr(choice0, "message") and isinstance(choice0.message, dict):
                 return choice0.message.get("content") or short_answer
+            if hasattr(choice0, "message") and hasattr(choice0.message, "get"):
+                return choice0.message.get("content") or short_answer
             if hasattr(choice0, "text"):
                 return choice0.text or short_answer
         return short_answer
     except Exception:
         return short_answer
 
-# --- вспомогательные функции ---
-def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
-    if not text or not options: return None
-    t = text.strip().lower()
-    map_num = {"1":0,"2":1,"3":2,"4":3,"5":4,"первый":0,"второй":1,"третий":2,"четвёртый":3,"пятый":4}
-    if t in map_num and map_num[t] < len(options): return map_num[t]
-    for i, opt in enumerate(options):
-        title = (opt.get("title") or "").lower()
-        if any(word in t for word in title.split()):
-            return i
-    return None
 
-OFF_TOPIC_KEYWORDS = ["python","код","программа","function","array","массив","счётчик","counter",
-                       "for","while","list","class","javascript","java","c++","go","rust","sql","база данных"]
-
-def is_off_topic(question: str) -> bool:
-    q = (question or "").lower()
-    return any(kw in q for kw in OFF_TOPIC_KEYWORDS)
-
-# --- ask_ai ---
+# --- Основная функция ask_ai ---
 async def ask_ai(user_id: int, question: str) -> Any:
     q = (question or "").strip()
 
-    # --- обработка payload device ---
+    # callback device
     if q.startswith("device:"):
         _, val = q.split(":", 1)
         val = val.strip()
@@ -200,12 +248,11 @@ async def ask_ai(user_id: int, question: str) -> Any:
             sessions.add_history(user_id, "assistant", f"device_set_{val}")
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
 
-    # приветствие + выбор устройства
     if not sessions.was_seen(user_id):
         sessions.mark_seen(user_id)
         sessions.add_history(user_id, "assistant", "greet_asked_device")
         return {
-            "text": "Здравствуйте! Выберите устройство:",
+            "text": "Здравствуйте! Выберите, через какое устройство вы пользуетесь:",
             "buttons": [
                 {"text": "Смартфон", "data": "device:mobile"},
                 {"text": "Компьютер", "data": "device:desktop"}
@@ -226,65 +273,43 @@ async def ask_ai(user_id: int, question: str) -> Any:
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
         return "Пожалуйста, выберите устройство: «смартфон» или «компьютер»."
 
-    # pending выбор
     pending = sessions.get_pending(user_id)
     if pending:
         idx = parse_choice(q, pending)
         if idx is None:
-            return "Пожалуйста, выберите вариант: номер или напишите фразу полностью."
+            return "Пожалуйста, выберите вариант: напишите номер (1, 2, ...) или напишите фразу полностью."
         selected = pending[idx]
         sessions.clear_pending(user_id)
-        answer_val = selected.get("answer") or selected.get("hint") or "Информация отсутствует."
-        return humanize_answer(answer_val, question)
+        answer_text = selected.get("value") or "Информация отсутствует."
+        return humanize_answer(answer_text, question)
 
-    # off-topic
     if is_off_topic(q):
-        return "Извините, я могу отвечать только по вопросам сайта."
+        return "Извините, я могу отвечать только по вопросам, связанным с работой сайта. Обратитесь по вопросам сайта."
 
-    # поиск по базе
     device = sessions.get_device(user_id) or "desktop"
     matches = search_matches(q, device)
 
-    # если ничего не найдено, используем GPT для понимания смысла
-    if not matches and openai_client:
-        prompt = f"{SYSTEM_PROMPT}\nПользователь спрашивает: «{q}». Используя данные из navigation и rules, сформулируй ответ."
-        try:
-            resp = openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-            )
-            if resp and getattr(resp, "choices", None):
-                choice0 = resp.choices[0]
-                text = ""
-                if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-                    text = choice0.message.get("content", "").strip()
-                elif hasattr(choice0, "text"):
-                    text = choice0.text.strip()
-                if text:
-                    return text
-        except Exception:
-            pass
-
     if not matches:
-        return "Извините, я не смог найти ответ. Попробуйте уточнить вопрос."
+        # если нет совпадений, GPT формирует ответ по смыслу
+        return humanize_answer("Информация по базе отсутствует.", question)
 
-    # один вариант
     if len(matches) == 1:
-        data = matches[0].get("answer") or matches[0].get("hint") or ""
+        data = matches[0].get("value")
         if isinstance(data, dict) and "steps" in data:
-            lines = [f"{data.get('title','Инструкция')}:"]
+            lines = [f"Чтобы {data.get('title')}, выполните следующие шаги:"]
             for i, step in enumerate(data["steps"], start=1):
                 lines.append(f"{i}. {step}.")
             return "\n".join(lines)
-        if isinstance(data, str):
+        if isinstance(data, str) and data.strip():
             return humanize_answer(data, question)
+        return "Информация по этому вопросу временно недоступна."
 
-    # несколько вариантов
+    # несколько совпадений
     sessions.set_pending(user_id, matches)
-    lines = ["Я нашёл несколько вариантов. Что вы имели в виду:"]
+    lines = ["Я нашёл несколько вариантов. Что вы имеете в виду:"]
     for i, m in enumerate(matches, start=1):
-        typ = "Правило" if m.get("type") == "rules" else "Раздел"
-        lines.append(f"{i}) {m.get('title') or '(без названия)'} ({typ})")
-    lines.append("Напишите номер варианта или уточните словами.")
+        label = "Правила" if m.get("type") == "rules" else "Раздел"
+        title = m.get("title") or "(без названия)"
+        lines.append(f"{i}) {title} ({label})")
+    lines.append("\nНапишите номер варианта (например, 1 или 2), либо напишите фразу полностью.")
     return "\n".join(lines)
