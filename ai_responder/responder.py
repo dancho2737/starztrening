@@ -265,28 +265,54 @@ def is_off_topic(question: str) -> bool:
 
 
 def humanize_answer(short_answer: str, user_question: str) -> str:
+    """
+    Ограничиваем вход и выход для безопасности (чтобы не отправлять в Telegram слишком длинные тексты).
+    - Вход (short_answer) обрезаем до MAX_INPUT_CHARS перед отправкой в OpenAI.
+    - Ответ OpenAI обрезаем до MAX_OUTPUT_CHARS перед возвратом.
+    """
     if not openai_client:
-        return short_answer
+        # если нет клиента — возвращаем уже подготовленный текст (только обрезка)
+        if not isinstance(short_answer, str):
+            short_answer = str(short_answer)
+        return short_answer[:3500]
+
     try:
+        # защита входа
+        MAX_INPUT_CHARS = 1500
+        safe_input = (short_answer or "")
+        if len(safe_input) > MAX_INPUT_CHARS:
+            safe_input = safe_input[:MAX_INPUT_CHARS] + "..."
+
         resp = openai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Сформулируй коротко и по-человечески ответ на вопрос: {user_question}\n\nИнформация:\n{short_answer}"}
+                {"role": "user", "content": f"Сформулируй коротко и по-человечески ответ на вопрос: {user_question}\n\nИнформация:\n{safe_input}"}
             ],
             temperature=0.2,
+            max_tokens=500,
         )
         if resp and getattr(resp, "choices", None):
             choice0 = resp.choices[0]
+            text = ""
             if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-                return choice0.message.get("content") or short_answer
-            if hasattr(choice0, "message") and hasattr(choice0.message, "get"):
-                return choice0.message.get("content") or short_answer
-            if hasattr(choice0, "text"):
-                return choice0.text or short_answer
-        return short_answer
+                text = choice0.message.get("content") or ""
+            elif hasattr(choice0, "text"):
+                text = choice0.text or ""
+            else:
+                text = str(choice0)
+
+            # защита выхода (Telegram предел ~4096, даём запас)
+            MAX_OUTPUT_CHARS = 3500
+            if len(text) > MAX_OUTPUT_CHARS:
+                return text[:MAX_OUTPUT_CHARS] + "..."
+            return text
+        return str(short_answer)[:3500]
     except Exception:
-        return short_answer
+        # при ошибке возвращаем безопасно усечённый исходный текст
+        if not isinstance(short_answer, str):
+            short_answer = str(short_answer)
+        return short_answer[:3500]
 
 
 # -----------------------
@@ -397,11 +423,13 @@ async def ask_ai(user_id: int, question: str) -> Any:
         selected = pending[idx]
         sessions.clear_pending(user_id)
         answer_text = selected.get("value") or "Информация отсутствует."
-        # форматируем ответ (dict или str) и отдаём humanized если нужно
+        # форматируем ответ (dict или str)
         formatted = _format_answer(answer_text)
-        if openai_client and isinstance(answer_text, str):
+        # humanize только для коротких строковых ответов (защита от слишком длинных сообщений)
+        if openai_client and isinstance(answer_text, str) and len(formatted) < 1500:
             return humanize_answer(formatted, question)
-        return formatted
+        # иначе возвращаем готовый формат (усечённый при необходимости)
+        return formatted if len(formatted) <= 3500 else formatted[:3500] + "..."
 
     # 4) off-topic detection
     if is_off_topic(q):
@@ -454,14 +482,14 @@ async def ask_ai(user_id: int, question: str) -> Any:
             selected_item = items_map[idx]
             answer_val = selected_item.get("answer") or selected_item.get("hint") or ""
             formatted = _format_answer(answer_val)
-            # humanize final text if it's a string answer
-            if openai_client and isinstance(answer_val, str):
+            # humanize final text только если исход — строка и короткая
+            if openai_client and isinstance(answer_val, str) and len(formatted) < 1500:
                 return humanize_answer(formatted, q)
-            return formatted
+            return formatted if len(formatted) <= 3500 else formatted[:3500] + "..."
 
         # Если GPT не выбрал ничего — даём общий humanize по контексту (если доступен), иначе сообщение
         if openai_client:
-            # Сформируем компактный контекст и передадим в humanize_answer
+            # Сформируем компактный контекст и передадим в humanize_answer (защита длины)
             ctx_parts = []
             max_items = 40
             count = 0
@@ -481,6 +509,9 @@ async def ask_ai(user_id: int, question: str) -> Any:
                 ctx_parts.append(part)
                 count += 1
             context_text = "\n\n".join(ctx_parts) if ctx_parts else "Информация по базе отсутствует."
+            # защита: сокращаем контекст перед humanize
+            if len(context_text) > 1500:
+                context_text = context_text[:1500] + "..."
             return humanize_answer(context_text, question)
 
         return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
@@ -489,16 +520,17 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if len(matches) == 1:
         data = matches[0].get("value")
 
-        # Новый формат: title + steps
+        # Новый формат: title + steps -> строго без OpenAI
         if isinstance(data, dict) and "steps" in data:
             return _format_answer(data)
 
         # Старый формат (строка)
         if isinstance(data, str) and data.strip():
-            # humanize строковых ответов, если есть openai_client
-            if openai_client:
+            # humanize строковых ответов, если есть openai_client и ответ короткий
+            if openai_client and len(data) < 1500:
                 return humanize_answer(data, question)
-            return data.strip()
+            # иначе возвращаем строку (усечённую при необходимости)
+            return data.strip() if len(data.strip()) <= 3500 else data.strip()[:3500] + "..."
 
         return "Информация по этому вопросу временно недоступна."
 
