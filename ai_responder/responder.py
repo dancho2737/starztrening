@@ -37,7 +37,7 @@ except Exception:
 
 
 # -----------------------
-# Сессии (не изменено)
+# Сессии: история + выбор устройства + ожидаемые варианты
 # -----------------------
 class SessionStore:
     def __init__(self):
@@ -127,7 +127,7 @@ def _title_of(item: Dict, default: str) -> str:
 
 def _format_answer(answer: Any) -> str:
     """
-    Форматирует answer (dict с title+steps или строку) в человекопонятный текст.
+    Форматирует answer (dict с title+steps или строка) в человекопонятный текст.
     """
     if isinstance(answer, dict):
         title = answer.get("title", "").strip()
@@ -152,11 +152,17 @@ def _safe_value_key(value: Any) -> str:
         return str(value)
 
 
+def _truncate_to_telegram(s: str, limit: int = 3800) -> str:
+    if not isinstance(s, str):
+        s = str(s)
+    return s if len(s) <= limit else s[:limit] + "..."
+
+
 # -----------------------
 # Поиск совпадений (оставил логику как у тебя)
 # -----------------------
 def search_matches(question: str, device: str) -> List[Dict]:
-    q = question.lower().strip()
+    q = (question or "").lower().strip()
     matches = []
     exact_matches = []
 
@@ -164,13 +170,13 @@ def search_matches(question: str, device: str) -> List[Dict]:
 
     def check_item(item, item_type):
         for kw in item.get("keywords", []):
-            kw_l = kw.lower().strip()
+            kw_l = (kw or "").lower().strip()
 
             # 1️⃣ ТОЧНОЕ совпадение — ВЫСШИЙ ПРИОРИТЕТ
             if q == kw_l:
                 exact_matches.append({
                     "type": item_type,
-                    "title": _title_of(item, kw),
+                    "title": _title_of(item, kw_l),
                     "value": item.get("hint") or item.get("answer", "")
                 })
                 return
@@ -179,7 +185,7 @@ def search_matches(question: str, device: str) -> List[Dict]:
             if kw_l in q and len(kw_l) > 3:
                 matches.append({
                     "type": item_type,
-                    "title": _title_of(item, kw),
+                    "title": _title_of(item, kw_l),
                     "value": item.get("hint") or item.get("answer", "")
                 })
                 return
@@ -264,25 +270,53 @@ def is_off_topic(question: str) -> bool:
     return False
 
 
+def _extract_choice_content(choice) -> str:
+    """
+    Вытаскивает текст из choice в разных вариантах SDK:
+    - предпочтительно: choice.message.content
+    - fallback: choice.get('message', {}).get('content') (if dict-like)
+    - иначе: пустая строка (чтобы не возвращать объект)
+    """
+    try:
+        # новый/объектный стиль
+        if hasattr(choice, "message") and hasattr(choice.message, "content"):
+            content = choice.message.content
+            return content.strip() if isinstance(content, str) else ""
+        # старый dict-like
+        if isinstance(choice, dict):
+            msg = choice.get("message") or choice.get("text") or ""
+            if isinstance(msg, dict):
+                return (msg.get("content") or "").strip()
+            if isinstance(msg, str):
+                return msg.strip()
+        # иногда есть поле 'text'
+        if hasattr(choice, "text"):
+            txt = getattr(choice, "text")
+            return txt.strip() if isinstance(txt, str) else ""
+    except Exception:
+        pass
+    return ""
+
+
 def humanize_answer(short_answer: str, user_question: str) -> str:
     """
-    Ограничиваем вход и выход для безопасности (чтобы не отправлять в Telegram слишком длинные тексты).
-    - Вход (short_answer) обрезаем до MAX_INPUT_CHARS перед отправкой в OpenAI.
-    - Ответ OpenAI обрезаем до MAX_OUTPUT_CHARS перед возвратом.
+    Используем OpenAI только для перефразирования коротких строковых ответов.
+    Защита:
+      - не передаём в OpenAI структурированные steps
+      - обрезаем вход/выход под лимит Telegram
     """
     if not openai_client:
-        # если нет клиента — возвращаем уже подготовленный текст (только обрезка)
-        if not isinstance(short_answer, str):
-            short_answer = str(short_answer)
-        return short_answer[:3500]
+        return _truncate_to_telegram(short_answer)
+
+    # если short_answer слишком большой — не шлём полностью
+    MAX_IN = 1500
+    safe_input = (short_answer or "")
+    if not isinstance(safe_input, str):
+        safe_input = str(safe_input)
+    if len(safe_input) > MAX_IN:
+        safe_input = safe_input[:MAX_IN] + "..."
 
     try:
-        # защита входа
-        MAX_INPUT_CHARS = 1500
-        safe_input = (short_answer or "")
-        if len(safe_input) > MAX_INPUT_CHARS:
-            safe_input = safe_input[:MAX_INPUT_CHARS] + "..."
-
         resp = openai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -290,29 +324,17 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
                 {"role": "user", "content": f"Сформулируй коротко и по-человечески ответ на вопрос: {user_question}\n\nИнформация:\n{safe_input}"}
             ],
             temperature=0.2,
-            max_tokens=500,
+            max_tokens=400,
         )
         if resp and getattr(resp, "choices", None):
             choice0 = resp.choices[0]
-            text = ""
-            if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-                text = choice0.message.get("content") or ""
-            elif hasattr(choice0, "text"):
-                text = choice0.text or ""
-            else:
-                text = str(choice0)
-
-            # защита выхода (Telegram предел ~4096, даём запас)
-            MAX_OUTPUT_CHARS = 3500
-            if len(text) > MAX_OUTPUT_CHARS:
-                return text[:MAX_OUTPUT_CHARS] + "..."
-            return text
-        return str(short_answer)[:3500]
+            text = _extract_choice_content(choice0)
+            if text:
+                return _truncate_to_telegram(text)
     except Exception:
-        # при ошибке возвращаем безопасно усечённый исходный текст
-        if not isinstance(short_answer, str):
-            short_answer = str(short_answer)
-        return short_answer[:3500]
+        pass
+
+    return _truncate_to_telegram(short_answer)
 
 
 # -----------------------
@@ -351,13 +373,7 @@ def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
         )
         if resp and getattr(resp, "choices", None):
             choice0 = resp.choices[0]
-            text = ""
-            if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-                text = (choice0.message.get("content") or "").strip()
-            elif hasattr(choice0, "text"):
-                text = (choice0.text or "").strip()
-            else:
-                text = str(choice0)
+            text = _extract_choice_content(choice0)
             # извлекаем первое число
             for token in text.replace("\n", " ").split():
                 if token.isdigit():
@@ -372,7 +388,7 @@ def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
 
 
 # -----------------------
-# Основная функция: ask_ai (обновлена — добавлен GPT-fallback)
+# Основная функция: ask_ai
 # -----------------------
 async def ask_ai(user_id: int, question: str) -> Any:
     q = (question or "").strip()
@@ -385,12 +401,14 @@ async def ask_ai(user_id: int, question: str) -> Any:
             sessions.set_device(user_id, val)
             user_device[user_id] = val
             sessions.add_history(user_id, "assistant", f"device_set_{val}")
+            # ответ после нажатия кнопки
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
 
     # 1) first contact: greet + ask device (but with buttons)
     if not sessions.was_seen(user_id):
         sessions.mark_seen(user_id)
         sessions.add_history(user_id, "assistant", "greet_asked_device")
+        # Возвращаем структуру с кнопками — хендлер должен отрисовать InlineKeyboard.
         return {
             "text": "Здравствуйте! Выберите, через какое устройство вы пользуетесь:",
             "buttons": [
@@ -425,10 +443,9 @@ async def ask_ai(user_id: int, question: str) -> Any:
         answer_text = selected.get("value") or "Информация отсутствует."
         # форматируем ответ (dict или str)
         formatted = _format_answer(answer_text)
-        # humanize только для коротких строковых ответов (защита от слишком длинных сообщений)
+        # humanize только для коротких строковых ответов
         if openai_client and isinstance(answer_text, str) and len(formatted) < 1500:
             return humanize_answer(formatted, question)
-        # иначе возвращаем готовый формат (усечённый при необходимости)
         return formatted if len(formatted) <= 3500 else formatted[:3500] + "..."
 
     # 4) off-topic detection
@@ -450,20 +467,17 @@ async def ask_ai(user_id: int, question: str) -> Any:
 
         # Создаём компактные кандидаты: title + первые keywords (если есть)
         for item in combined:
-            # получаем title
             ans = item.get("answer")
             if isinstance(ans, dict):
                 title = ans.get("title") or _title_of(item, "Без названия")
             else:
                 title = item.get("title") or _title_of(item, "Без названия")
 
-            # краткая подсказка из keywords или первых шагов
             kw_excerpt = ""
             kws = item.get("keywords") or []
             if kws:
                 kw_excerpt = ", ".join(kws[:3])
             else:
-                # если нет keywords, попробуем взять первые шаги/текст
                 if isinstance(ans, dict):
                     steps = ans.get("steps", []) or []
                     if steps:
@@ -482,14 +496,12 @@ async def ask_ai(user_id: int, question: str) -> Any:
             selected_item = items_map[idx]
             answer_val = selected_item.get("answer") or selected_item.get("hint") or ""
             formatted = _format_answer(answer_val)
-            # humanize final text только если исход — строка и короткая
             if openai_client and isinstance(answer_val, str) and len(formatted) < 1500:
                 return humanize_answer(formatted, q)
             return formatted if len(formatted) <= 3500 else formatted[:3500] + "..."
 
         # Если GPT не выбрал ничего — даём общий humanize по контексту (если доступен), иначе сообщение
         if openai_client:
-            # Сформируем компактный контекст и передадим в humanize_answer (защита длины)
             ctx_parts = []
             max_items = 40
             count = 0
@@ -509,7 +521,6 @@ async def ask_ai(user_id: int, question: str) -> Any:
                 ctx_parts.append(part)
                 count += 1
             context_text = "\n\n".join(ctx_parts) if ctx_parts else "Информация по базе отсутствует."
-            # защита: сокращаем контекст перед humanize
             if len(context_text) > 1500:
                 context_text = context_text[:1500] + "..."
             return humanize_answer(context_text, question)
@@ -526,10 +537,8 @@ async def ask_ai(user_id: int, question: str) -> Any:
 
         # Старый формат (строка)
         if isinstance(data, str) and data.strip():
-            # humanize строковых ответов, если есть openai_client и ответ короткий
             if openai_client and len(data) < 1500:
                 return humanize_answer(data, question)
-            # иначе возвращаем строку (усечённую при необходимости)
             return data.strip() if len(data.strip()) <= 3500 else data.strip()[:3500] + "..."
 
         return "Информация по этому вопросу временно недоступна."
