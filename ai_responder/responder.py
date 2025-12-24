@@ -37,7 +37,7 @@ except Exception:
 
 
 # -----------------------
-# Сессии
+# Сессии (не изменено)
 # -----------------------
 class SessionStore:
     def __init__(self):
@@ -114,34 +114,26 @@ _sync_user_device_from_sessions()
 # Утилиты
 # -----------------------
 def _title_of(item: Dict, default: str) -> str:
-    """
-    Получить читабельный заголовок элемента: сначала answer.title, затем title/name, затем первый keyword.
-    """
-    ans = item.get("answer")
-    if isinstance(ans, dict):
-        t = ans.get("title")
-        if t:
-            return t
     t = item.get("title") or item.get("name")
-    if t:
-        return t
-    kws = item.get("keywords") or []
-    if kws:
-        return kws[0]
-    txt = item.get("hint") or ""
-    return (txt[:60] + "...") if txt else default
+    if not t:
+        kws = item.get("keywords") or []
+        if kws:
+            t = kws[0]
+    if not t:
+        txt = item.get("hint") or item.get("answer") or ""
+        t = (txt[:60] + "...") if txt else default
+    return t
 
 
 def _format_answer(answer: Any) -> str:
     """
-    Преобразует answer (dict с title+steps или строку) в итоговый текст для пользователя.
+    Форматирует answer (dict с title+steps или строку) в человекопонятный текст.
     """
     if isinstance(answer, dict):
         title = answer.get("title", "").strip()
         steps = answer.get("steps", []) or []
         lines: List[str] = []
         if title:
-            # Формулировка: "Чтобы <title>, выполните следующие шаги:"
             lines.append(f"Чтобы {title}, выполните следующие шаги:")
         for i, s in enumerate(steps, start=1):
             step = str(s).strip().rstrip(".")
@@ -154,9 +146,6 @@ def _format_answer(answer: Any) -> str:
 
 
 def _safe_value_key(value: Any) -> str:
-    """
-    Сериализуем value для сравнения/дедупликации.
-    """
     try:
         return json.dumps(value, sort_keys=True, ensure_ascii=False)
     except Exception:
@@ -164,78 +153,54 @@ def _safe_value_key(value: Any) -> str:
 
 
 # -----------------------
-# Поиск совпадений в базе
+# Поиск совпадений (оставил логику как у тебя)
 # -----------------------
 def search_matches(question: str, device: str) -> List[Dict]:
-    """
-    Ищет совпадения по keywords в navigation (mobile/desktop) и rules.
-    Возвращает список объектов вида:
-      { "type": "navigation"|"rules", "title": "...", "value": <answer obj or string> }
-    Логика:
-      - точное совпадение keyword (полное) — высший приоритет
-      - частичное вхождение ключевого phrase (len>3) — допустимо
-      - если item имеет пустые keywords — НЕ добавляем как match автоматически (чтобы не шумить),
-        такие элементы будут доступны GPT-фаулбеку через контекст.
-    """
-    q = (question or "").lower().strip()
-    matches: List[Dict] = []
-    exact_matches: List[Dict] = []
+    q = question.lower().strip()
+    matches = []
+    exact_matches = []
 
     nav = navigation_mobile if device == "mobile" else navigation_desktop
 
-    def check_item(item: Dict, item_type: str):
-        kws = item.get("keywords") or []
-        answer = item.get("answer") if ("answer" in item) else item.get("hint")
-        # пропускаем пустые keywords — они не должны автоматически матчиться
-        if not kws:
-            return
-        for kw in kws:
-            if not kw:
-                continue
+    def check_item(item, item_type):
+        for kw in item.get("keywords", []):
             kw_l = kw.lower().strip()
-            # точное совпадение
+
+            # 1️⃣ ТОЧНОЕ совпадение — ВЫСШИЙ ПРИОРИТЕТ
             if q == kw_l:
                 exact_matches.append({
                     "type": item_type,
-                    "title": _title_of(item, kw_l),
-                    "value": answer
-                })
-                return
-            # частичное вхождение (phrase length guard)
-            if len(kw_l) > 3 and kw_l in q:
-                matches.append({
-                    "type": item_type,
-                    "title": _title_of(item, kw_l),
-                    "value": answer
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
                 })
                 return
 
-    # навигация
+            # 2️⃣ Вопрос длиннее, но ключевая фраза содержится внутри
+            if kw_l in q and len(kw_l) > 3:
+                matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+
+    # 🔹 Навигация
     for item in nav:
         check_item(item, "navigation")
 
-    # правила
+    # 🔹 Правила
     for rule in rules:
-        # rules могут иметь ту же структуру
         check_item(rule, "rules")
 
-    # приоритет точного совпадения
+    # 🔥 ЕСЛИ ЕСТЬ ТОЧНОЕ СОВПАДЕНИЕ — ВОЗВРАЩАЕМ ТОЛЬКО ЕГО
     if exact_matches:
-        # преобразуем в унифицированный формат и вернем
-        unique = []
-        seen = set()
-        for m in exact_matches:
-            key = (m.get("type"), _safe_value_key(m.get("value")))
-            if key not in seen:
-                seen.add(key)
-                unique.append(m)
-        return unique
+        return exact_matches
 
-    # удаление дубликатов для matches
+    # 🧹 Удаляем дубликаты (одинаковый смысл)
     unique = []
     seen = set()
     for m in matches:
-        key = (m.get("type"), _safe_value_key(m.get("value")))
+        key = (m["type"], _safe_value_key(m["value"]))
         if key not in seen:
             seen.add(key)
             unique.append(m)
@@ -300,10 +265,6 @@ def is_off_topic(question: str) -> bool:
 
 
 def humanize_answer(short_answer: str, user_question: str) -> str:
-    """
-    Если есть openai_client — просим модель переформулировать коротко и по-человечески,
-    используя provided short_answer как контекст. Если клиента нет — возвращаем short_answer.
-    """
     if not openai_client:
         return short_answer
     try:
@@ -314,12 +275,12 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
                 {"role": "user", "content": f"Сформулируй коротко и по-человечески ответ на вопрос: {user_question}\n\nИнформация:\n{short_answer}"}
             ],
             temperature=0.2,
-            max_tokens=512,
         )
         if resp and getattr(resp, "choices", None):
             choice0 = resp.choices[0]
-            # совместимость с разными формами ответа
             if hasattr(choice0, "message") and isinstance(choice0.message, dict):
+                return choice0.message.get("content") or short_answer
+            if hasattr(choice0, "message") and hasattr(choice0.message, "get"):
                 return choice0.message.get("content") or short_answer
             if hasattr(choice0, "text"):
                 return choice0.text or short_answer
@@ -329,12 +290,68 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
 
 
 # -----------------------
-# Основная функция: ask_ai
+# NEW: ask_gpt_for_intent — использует OpenAI чтобы выбрать подходящую запись из candidates
+# -----------------------
+def ask_gpt_for_intent(user_text: str, candidates: List[str]) -> Optional[int]:
+    """
+    Просит модель выбрать индекс (0-based) наиболее подходящего варианта из candidates.
+    Возвращает индекс или None.
+    Модель просят ответить ТОЛЬКО числом (1..N) или 0 если ни один не подходит.
+    """
+    if not openai_client or not candidates:
+        return None
+
+    # Ограничим кандидатов для экономии токенов
+    max_cand = 30
+    cand = candidates[:max_cand]
+    numbered = "\n".join([f"{i+1}. {c}" for i, c in enumerate(cand)])
+    prompt = (
+        "Ты — помощник службы поддержки. Пользователь задал вопрос. Выбери ЛУЧШИЙ вариант из списка, "
+        "который соответствует намерению пользователя. Ответь ТОЛЬКО числом: номер варианта (1, 2, ...) или 0 если ничего не подходит.\n\n"
+        f"Запрос пользователя:\n\"{user_text}\"\n\n"
+        "Варианты:\n" + numbered + "\n\n"
+        "Ответ (только число):"
+    )
+
+    try:
+        resp = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            max_tokens=6,
+        )
+        if resp and getattr(resp, "choices", None):
+            choice0 = resp.choices[0]
+            text = ""
+            if hasattr(choice0, "message") and isinstance(choice0.message, dict):
+                text = (choice0.message.get("content") or "").strip()
+            elif hasattr(choice0, "text"):
+                text = (choice0.text or "").strip()
+            else:
+                text = str(choice0)
+            # извлекаем первое число
+            for token in text.replace("\n", " ").split():
+                if token.isdigit():
+                    num = int(token)
+                    if num == 0:
+                        return None
+                    if 1 <= num <= len(cand):
+                        return num - 1
+    except Exception:
+        return None
+    return None
+
+
+# -----------------------
+# Основная функция: ask_ai (обновлена — добавлен GPT-fallback)
 # -----------------------
 async def ask_ai(user_id: int, question: str) -> Any:
     q = (question or "").strip()
 
-    # обработка специальных payload'ов (callback data)
+    # --- обработка специальных payload'ов (callback data) ---
     if q.startswith("device:"):
         _, val = q.split(":", 1)
         val = val.strip()
@@ -348,7 +365,6 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if not sessions.was_seen(user_id):
         sessions.mark_seen(user_id)
         sessions.add_history(user_id, "assistant", "greet_asked_device")
-        # Возвращаем структуру с кнопками — хендлер должен отрисовать InlineKeyboard.
         return {
             "text": "Здравствуйте! Выберите, через какое устройство вы пользуетесь:",
             "buttons": [
@@ -372,7 +388,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
         return "Пожалуйста, выберите устройство: «смартфон» или «компьютер»."
 
-    # 3) если ожидается выбор из предыдущих вариантов
+    # 3) if awaiting pending choice
     pending = sessions.get_pending(user_id)
     if pending:
         idx = parse_choice(q, pending)
@@ -380,10 +396,10 @@ async def ask_ai(user_id: int, question: str) -> Any:
             return "Пожалуйста, выберите вариант: напишите номер (1, 2, ...) или напишите фразу полностью."
         selected = pending[idx]
         sessions.clear_pending(user_id)
-        answer_val = selected.get("value") or "Информация отсутствует."
-        # форматируем и humanize (если нужно)
-        formatted = _format_answer(answer_val) if isinstance(answer_val, (dict, str)) else str(answer_val)
-        if openai_client and isinstance(answer_val, str):
+        answer_text = selected.get("value") or "Информация отсутствует."
+        # форматируем ответ (dict или str) и отдаём humanized если нужно
+        formatted = _format_answer(answer_text)
+        if openai_client and isinstance(answer_text, str):
             return humanize_answer(formatted, question)
         return formatted
 
@@ -391,67 +407,107 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if is_off_topic(q):
         return "Извините, я могу отвечать только по вопросам, связанным с работой сайта. Обратитесь по вопросам сайта."
 
-    # 5) normal search
+    # 5) normal search by keywords
     device = sessions.get_device(user_id) or "desktop"
     matches = search_matches(q, device)
 
-    # 5a) fallback: если ничего не найдено — передаём весь релевантный контекст в humanize_answer
+    # 6) Если не найдено совпадений — используем GPT, чтобы понять намерение и выбрать подходящий раздел
     if not matches:
-        # Собираем контекст из navigation_desktop + navigation_mobile + rules
-        # Ограничиваем общий объём контекста (например, первые 60 элементов), чтобы не перегружать prompt.
-        all_items = (navigation_desktop or []) + (navigation_mobile or []) + (rules or [])
-        # Уберём дубликаты по title/value для компактности
-        seen_ctx = set()
-        ctx_parts: List[str] = []
-        max_items = 80  # предохранитель по размеру контекста
-        count = 0
-        for item in all_items:
-            if count >= max_items:
-                break
-            ans = item.get("answer") or item.get("hint") or ""
-            title = _title_of(item, "Без названия")
-            # формируем компактное представление
-            if isinstance(ans, dict) and "steps" in ans:
-                steps = ans.get("steps", []) or []
-                steps_text = " / ".join([str(s).strip().rstrip(".") for s in steps[:6]])  # укороченно
-                part = f"{title}: {steps_text}"
-            elif isinstance(ans, str):
-                part = f"{title}: {ans.strip()[:400]}"
+        # Собираем candidates (title + краткое описание) из navigation (текущая версия) и rules
+        items_map: List[Dict] = []
+        candidates: List[str] = []
+
+        nav = navigation_mobile if device == "mobile" else navigation_desktop
+        combined = (nav or []) + (rules or [])
+
+        # Создаём компактные кандидаты: title + первые keywords (если есть)
+        for item in combined:
+            # получаем title
+            ans = item.get("answer")
+            if isinstance(ans, dict):
+                title = ans.get("title") or _title_of(item, "Без названия")
             else:
-                part = f"{title}"
-            key = part
-            if key in seen_ctx:
-                continue
-            seen_ctx.add(key)
-            ctx_parts.append(part)
-            count += 1
+                title = item.get("title") or _title_of(item, "Без названия")
 
-        context_text = "\n\n".join(ctx_parts) if ctx_parts else "Информация по базе отсутствует."
-        # humanize_answer будет сочетать вопрос и контекст и сформировать понятный ответ
-        return humanize_answer(context_text, question)
+            # краткая подсказка из keywords или первых шагов
+            kw_excerpt = ""
+            kws = item.get("keywords") or []
+            if kws:
+                kw_excerpt = ", ".join(kws[:3])
+            else:
+                # если нет keywords, попробуем взять первые шаги/текст
+                if isinstance(ans, dict):
+                    steps = ans.get("steps", []) or []
+                    if steps:
+                        kw_excerpt = str(steps[0])[:80]
+                elif isinstance(ans, str):
+                    kw_excerpt = ans[:80]
 
-    # 6) если найдено ровно одно совпадение (по keywords)
+            candidate_text = f"{title}" + (f" — {kw_excerpt}" if kw_excerpt else "")
+            candidates.append(candidate_text)
+            items_map.append(item)
+
+        # спросим GPT, какой индекс подходит
+        idx = ask_gpt_for_intent(q, candidates) if openai_client else None
+
+        if idx is not None and 0 <= idx < len(items_map):
+            selected_item = items_map[idx]
+            answer_val = selected_item.get("answer") or selected_item.get("hint") or ""
+            formatted = _format_answer(answer_val)
+            # humanize final text if it's a string answer
+            if openai_client and isinstance(answer_val, str):
+                return humanize_answer(formatted, q)
+            return formatted
+
+        # Если GPT не выбрал ничего — даём общий humanize по контексту (если доступен), иначе сообщение
+        if openai_client:
+            # Сформируем компактный контекст и передадим в humanize_answer
+            ctx_parts = []
+            max_items = 40
+            count = 0
+            for item in combined:
+                if count >= max_items:
+                    break
+                ans = item.get("answer") or item.get("hint") or ""
+                title = _title_of(item, "Без названия")
+                if isinstance(ans, dict) and "steps" in ans:
+                    steps = ans.get("steps", []) or []
+                    steps_text = " / ".join([str(s).strip().rstrip(".") for s in steps[:5]])
+                    part = f"{title}: {steps_text}"
+                elif isinstance(ans, str):
+                    part = f"{title}: {ans.strip()[:200]}"
+                else:
+                    part = title
+                ctx_parts.append(part)
+                count += 1
+            context_text = "\n\n".join(ctx_parts) if ctx_parts else "Информация по базе отсутствует."
+            return humanize_answer(context_text, question)
+
+        return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
+
+    # 7) если найдено ровно одно совпадение (по keywords)
     if len(matches) == 1:
         data = matches[0].get("value")
-        # если value - dict с steps/title
+
+        # Новый формат: title + steps
         if isinstance(data, dict) and "steps" in data:
             return _format_answer(data)
-        # старый формат (строка)
-        if isinstance(data, str) and data.strip():
-            text = _format_answer(data)
-            if openai_client:
-                return humanize_answer(text, question)
-            return text
-        # другие типы
-        text = _format_answer(data)
-        return text
 
-    # 7) несколько совпадений -> показать варианты и ждать выбора
+        # Старый формат (строка)
+        if isinstance(data, str) and data.strip():
+            # humanize строковых ответов, если есть openai_client
+            if openai_client:
+                return humanize_answer(data, question)
+            return data.strip()
+
+        return "Информация по этому вопросу временно недоступна."
+
+    # 8) multiple matches -> present options and save pending
     sessions.set_pending(user_id, matches)
     lines = ["Я нашёл несколько вариантов. Что вы имеете в виду:"]
     for i, m in enumerate(matches, start=1):
         label = "Правила" if m.get("type") == "rules" else "Раздел"
         title = m.get("title") or "(без названия)"
         lines.append(f"{i}) {title} ({label})")
-    lines.append("Напишите номер варианта (например, 1 или 2), либо напишите фразу полностью.")
+    lines.append("\nНапишите номер варианта (например, 1 или 2), либо напишите фразу полностью.")
     return "\n".join(lines)
