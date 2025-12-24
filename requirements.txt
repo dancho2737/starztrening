@@ -4,3 +4,4 @@ python-dotenv==1.0.1
 tiktoken==0.7.0
 httpx==0.27.0
 gunicorn==22.0.0
+pymorphy2==0.9.1
