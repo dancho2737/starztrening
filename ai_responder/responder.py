@@ -46,19 +46,24 @@ class SessionStore:
         self.pending: Dict[int, List[Dict]] = {}   # user_id -> list of options
         self.first_seen: set = set()               # чтобы поприветствовать один раз
 
+    # history helpers (new API)
     def add_history(self, user_id: int, role: str, content: str):
         self.history.setdefault(user_id, []).append({"role": role, "content": content})
 
     def get_history(self, user_id: int):
         return self.history.get(user_id, [])
 
+    # Backwards-compatible methods used by handlers (sessions.add / get / clear)
     def add(self, user_id: int, role: str, content: str):
+        """Compatibility: sessions.add(user_id, role, content)"""
         return self.add_history(user_id, role, content)
 
     def get(self, user_id: int):
+        """Compatibility: sessions.get(user_id) -> history list"""
         return self.get_history(user_id)
 
     def clear(self, user_id: int):
+        """Compatibility: clear all user data (history, pending, device, seen)"""
         self.history.pop(user_id, None)
         self.pending.pop(user_id, None)
         self.device.pop(user_id, None)
@@ -117,144 +122,115 @@ def _title_of(item: Dict, default: str) -> str:
     return t
 
 
-def _token_overlap_score(q1: str, q2: str) -> float:
-    """Возвращает долю общих токенов (примерная семантическая мера)"""
-    t1 = set(re.findall(r'\w+', q1.lower()))
-    t2 = set(re.findall(r'\w+', q2.lower()))
-    if not t1 or not t2:
+# вспомогательные метрики
+def _token_overlap_score(a: str, b: str) -> float:
+    a_tokens = set(re.findall(r'\w+', (a or "").lower()))
+    b_tokens = set(re.findall(r'\w+', (b or "").lower()))
+    if not a_tokens or not b_tokens:
         return 0.0
-    return len(t1 & t2) / max(len(t1), len(t2))
+    inter = a_tokens.intersection(b_tokens)
+    return len(inter) / max(len(a_tokens), len(b_tokens))
 
 
-def _score_for_keyword_match(q: str, kw: str) -> float:
-    if not kw:
-        return 0.0
-    kw_clean = re.sub(r'\s+', ' ', kw.lower().strip())
-    if q == kw_clean:
-        return 1.0
-    if kw_clean in q:
-        return 0.90
-    overlap = _token_overlap_score(q, kw_clean)
-    if overlap > 0:
-        return max(0.0, min(0.85, overlap * 0.85))
+def _fuzzy_ratio(a: str, b: str) -> float:
     try:
-        ratio = difflib.SequenceMatcher(None, q, kw_clean).ratio()
-        if ratio > 0.6:
-            return (ratio - 0.6) / 0.4 * 0.45 + 0.45
+        return difflib.SequenceMatcher(None, a, b).ratio()
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 
+# Основная функция поиска совпадений — минимальные правки от исходной логики
 def search_matches(question: str, device: str) -> List[Dict]:
+    """
+    Поведение:
+      - сначала — точное совпадение по keywords (высший приоритет)
+      - затем — вхождение keyword в вопрос
+      - затем — token-overlap / fuzzy (поймает опечатки и близкие формулировки)
+      - навигация и правила просматриваются одинаково; value = answer (приоритет) или hint
+    """
     q_raw = (question or "").strip()
+    # нормализуем: пробелы, регистр
     q = re.sub(r'\s+', ' ', q_raw.lower())
 
+    matches: List[Dict] = []
+    exact_matches: List[Dict] = []
+
     nav = navigation_mobile if device == "mobile" else navigation_desktop
-    candidates = []
 
-    def add_candidate(item: Dict, item_type: str):
-        val = item.get("answer") or item.get("hint") or ""
-        keywords = item.get("keywords") or []
-        title = _title_of(item, "Без названия")
-        candidates.append({
-            "type": item_type,
-            "title": title,
-            "value": val,
-            "keywords": keywords,
-            "_raw": item
-        })
+    def check_item(item: Dict, item_type: str):
+        # value берём из answer (приоритет) -> hint fallback
+        val = item.get("answer") if item.get("answer") is not None else item.get("hint", "")
+        for kw in item.get("keywords", []) or []:
+            kw_l = re.sub(r'\s+', ' ', (kw or "").lower().strip())
 
-    for it in nav:
-        add_candidate(it, "navigation")
-    for r in rules:
-        if not isinstance(r, dict):
-            continue
-        add_candidate(r, "rules")
+            # 1) Точное совпадение — ВЫСШИЙ ПРИОРИТЕТ
+            if q == kw_l and kw_l:
+                exact_matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw_l),
+                    "value": val
+                })
+                return
 
-    scored = []
-    for cand in candidates:
-        best_kw_score = 0.0
-        for kw in cand.get("keywords", []) or []:
-            s = _score_for_keyword_match(q, kw)
-            if s > best_kw_score:
-                best_kw_score = s
-        if best_kw_score == 0.0:
-            best_kw_score = max(
-                best_kw_score,
-                _token_overlap_score(q, cand.get("title","")) * 0.7,
-                _token_overlap_score(q, str(cand.get("value",""))) * 0.6
-            )
-        boost = 1.0
-        if cand.get("type") == "navigation":
-            boost += 0.06
-        try:
-            if isinstance(cand.get("value"), dict) and "steps" in cand.get("value"):
-                boost += 0.04
-        except Exception:
-            pass
+            # 2) Простое вхождение ключевого слова
+            if kw_l and kw_l in q:
+                matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw_l),
+                    "value": val
+                })
+                return
 
-        final_score = best_kw_score * boost
-        if final_score > 0:
-            scored.append({
-                "cand": cand,
-                "score": final_score,
-                "kw_score": best_kw_score
-            })
+            # 3) Token overlap
+            try:
+                if _token_overlap_score(q, kw_l) >= 0.4:
+                    matches.append({
+                        "type": item_type,
+                        "title": _title_of(item, kw_l),
+                        "value": val
+                    })
+                    return
+            except Exception:
+                pass
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+            # 4) Fuzzy match (опечатки / близкие формы)
+            try:
+                ratio = _fuzzy_ratio(q, kw_l)
+                if ratio >= 0.72:
+                    matches.append({
+                        "type": item_type,
+                        "title": _title_of(item, kw_l),
+                        "value": val
+                    })
+                    return
+            except Exception:
+                pass
 
-    if scored:
-        top = scored[0]
-        threshold = 0.52
-        if top["score"] >= threshold:
-            if len(scored) == 1 or (top["score"] - scored[1]["score"]) >= 0.09:
-                c = top["cand"]
-                return [{
-                    "type": c["type"],
-                    "title": c["title"],
-                    "value": c["value"]
-                }]
-        options = []
-        used = set()
-        for s in scored[:6]:
-            c = s["cand"]
-            key = (c["type"], str(c["value"]))
-            if key in used:
-                continue
-            used.add(key)
-            options.append({
-                "type": c["type"],
-                "title": c["title"],
-                "value": c["value"]
-            })
-        if options:
-            return options
+    # 🔹 Навигация
+    for item in nav:
+        # защита: ожидаем, что nav элемент — dict
+        if isinstance(item, dict):
+            check_item(item, "navigation")
 
-    sem = []
-    try:
-        sem = _semantic_match_with_embeddings(q, device, top_k=3)
-    except Exception:
-        sem = []
-    if not sem:
-        try:
-            sem = _semantic_match_with_chat(q, device, top_k=3)
-        except Exception:
-            sem = []
+    # 🔹 Правила
+    for rule in rules:
+        if isinstance(rule, dict):
+            check_item(rule, "rules")
 
-    final = []
+    # 🔥 ЕСЛИ ЕСТЬ ТОЧНОЕ СОВПАДЕНИЕ — ВОЗВРАЩАЕМ ТОЛЬКО ЕГО
+    if exact_matches:
+        return exact_matches
+
+    # 🧹 Удаляем дубликаты (одинаковый смысл)
+    unique = []
     seen = set()
-    for r in sem:
-        key = (r.get("type"), str(r.get("value")))
-        if key in seen:
-            continue
-        seen.add(key)
-        final.append({
-            "type": r.get("type"),
-            "title": r.get("title"),
-            "value": r.get("value")
-        })
-    return final
+    for m in matches:
+        key = (m["type"], str(m["value"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    return unique
 
 
 def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
@@ -335,9 +311,11 @@ def humanize_answer(short_answer: str, user_question: str) -> str:
         return short_answer
 
 
+# --- Центральная функция: ask_ai (оставлен контракт как в исходнике) ---
 async def ask_ai(user_id: int, question: str) -> Any:
     q = (question or "").strip()
 
+    # --- обработка специальных payload'ов (callback data) ---
     if q.startswith("device:"):
         _, val = q.split(":", 1)
         val = val.strip()
@@ -347,6 +325,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
             sessions.add_history(user_id, "assistant", f"device_set_{val}")
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
 
+    # 1) first contact: greet + ask device (but with buttons)
     if not sessions.was_seen(user_id):
         sessions.mark_seen(user_id)
         sessions.add_history(user_id, "assistant", "greet_asked_device")
@@ -358,6 +337,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
             ]
         }
 
+    # 2) device selection
     if not sessions.has_device(user_id):
         t = q.lower()
         if any(x in t for x in ("смартфон", "телефон", "mobile", "мобил")):
@@ -372,6 +352,7 @@ async def ask_ai(user_id: int, question: str) -> Any:
             return "Отлично! Слушаю вас внимательно, какой будет вопрос?"
         return "Пожалуйста, выберите устройство: «смартфон» или «компьютер»."
 
+    # 3) if awaiting pending choice
     pending = sessions.get_pending(user_id)
     if pending:
         idx = parse_choice(q, pending)
@@ -380,11 +361,19 @@ async def ask_ai(user_id: int, question: str) -> Any:
         selected = pending[idx]
         sessions.clear_pending(user_id)
         answer_text = selected.get("value") or "Информация отсутствует."
+        # если value — dict со steps, сформируем шаги
+        if isinstance(answer_text, dict) and "steps" in answer_text:
+            lines = [f"Чтобы {answer_text.get('title')}, выполните следующие шаги:"]
+            for i, step in enumerate(answer_text["steps"], start=1):
+                lines.append(f"{i}. {step}.")
+            return "\n".join(lines)
         return humanize_answer(answer_text, question)
 
+    # 4) off-topic detection
     if is_off_topic(q):
         return "Извините, я могу отвечать только по вопросам, связанным с работой сайта. Обратитесь по вопросам сайта."
 
+    # 5) normal search
     device = sessions.get_device(user_id) or "desktop"
     matches = search_matches(q, device)
 
@@ -394,17 +383,20 @@ async def ask_ai(user_id: int, question: str) -> Any:
     if len(matches) == 1:
         data = matches[0].get("value")
 
+        # Новый формат: title + steps
         if isinstance(data, dict) and "steps" in data:
             lines = [f"Чтобы {data.get('title')}, выполните следующие шаги:"]
             for i, step in enumerate(data["steps"], start=1):
                 lines.append(f"{i}. {step}.")
             return "\n".join(lines)
 
+        # Старый формат (строка)
         if isinstance(data, str) and data.strip():
             return humanize_answer(data, question)
 
         return "Информация по этому вопросу временно недоступна."
 
+    # multiple matches -> present options and save pending
     sessions.set_pending(user_id, matches)
     lines = ["Я нашёл несколько вариантов. Что вы имеете в виду:"]
     for i, m in enumerate(matches, start=1):
