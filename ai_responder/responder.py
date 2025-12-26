@@ -5,6 +5,8 @@ from typing import List, Dict, Optional, Any
 from openai import OpenAI
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
 import math
+import re
+import difflib
 
 ROOT = Path(__file__).resolve().parents[1]
 
