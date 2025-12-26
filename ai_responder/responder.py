@@ -310,16 +310,11 @@ def _semantic_match_with_chat(question: str, device: str, top_k: int = 3) -> Lis
 # -----------------------
 # Основной поиск совпадений
 # -----------------------
-def search_matches(question: str, device: str) -> List[Dict]:
-    """
-    Поведение:
-    1) сначала — строгое (точное) совпадение по keywords (высший приоритет)
-    2) затем — частичное вхождение keyword в вопрос (если kw длинее 3)
-    3) если совпадений нет — семантический поиск (embeddings -> chat fallback)
-    Возвращаем список объектов:
-      { "type": "navigation"|"rules", "title": "...", "value": "...", ... }
-    """
-    q = (question or "").lower().strip()
+def search_matches(question: str, device: str) -> list:
+    """Ищет совпадения вопроса пользователя с навигацией и правилами."""
+    q_raw = (question or "").strip()
+    q = re.sub(r'\s+', ' ', q_raw.lower())
+    
     matches = []
     exact_matches = []
 
@@ -327,39 +322,63 @@ def search_matches(question: str, device: str) -> List[Dict]:
 
     def check_item(item, item_type):
         for kw in item.get("keywords", []) or []:
-            kw_l = (kw or "").lower().strip()
+            kw_clean = re.sub(r'\s+', ' ', kw.lower().strip())
 
-            # 1️⃣ ТОЧНОЕ совпадение — ВЫСШИЙ ПРИОРИТЕТ
-            if q == kw_l and kw_l:
+            # 1) Точное совпадение
+            if q == kw_clean:
                 exact_matches.append({
                     "type": item_type,
-                    "title": _title_of(item, kw_l),
+                    "title": _title_of(item, kw),
                     "value": item.get("hint") or item.get("answer", "")
                 })
                 return
 
-            # 2️⃣ Вопрос длиннее, но ключевая фраза содержится внутри
-            if kw_l and kw_l in q and len(kw_l) > 3:
+            # 2) Простое вхождение ключевого слова
+            if kw_clean in q:
                 matches.append({
                     "type": item_type,
-                    "title": _title_of(item, kw_l),
+                    "title": _title_of(item, kw),
                     "value": item.get("hint") or item.get("answer", "")
                 })
                 return
 
-    # 🔹 Навигация
+            # 3) Token overlap (пересечение слов)
+            if _token_overlap_score(q, kw_clean) >= 0.5:
+                matches.append({
+                    "type": item_type,
+                    "title": _title_of(item, kw),
+                    "value": item.get("hint") or item.get("answer", "")
+                })
+                return
+
+            # 4) Fuzzy match (опечатки / близкие формулировки)
+            try:
+                ratio = difflib.SequenceMatcher(None, q, kw_clean).ratio()
+                if ratio >= 0.72:
+                    matches.append({
+                        "type": item_type,
+                        "title": _title_of(item, kw),
+                        "value": item.get("hint") or item.get("answer", "")
+                    })
+                    return
+            except Exception:
+                pass
+
+    # Проверяем навигацию
     for item in nav:
         check_item(item, "navigation")
 
-    # 🔹 Правила
+    # Проверяем правила
     for rule in rules:
+        if not isinstance(rule, dict):
+            continue
         check_item(rule, "rules")
 
-    # 🔥 ЕСЛИ ЕСТЬ ТОЧНОЕ СОВПАДЕНИЕ — ВОЗВРАЩАЕМ ТОЛЬКО ЕГО
+    # Если есть точное совпадение — возвращаем только его
     if exact_matches:
         return exact_matches
 
-    # 🧹 Удаляем дубликаты (одинаковый смысл)
+    # Убираем дубликаты по типу и значению
     unique = []
     seen = set()
     for m in matches:
@@ -368,8 +387,7 @@ def search_matches(question: str, device: str) -> List[Dict]:
             seen.add(key)
             unique.append(m)
 
-    if unique:
-        return unique
+    return unique
 
     # -----------------------
     # НИЖЕ: семантический поиск, если не нашли совпадений по keywords
