@@ -1,12 +1,11 @@
 # ai_responder/responder.py
 import json
+import re
+import difflib
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
-import math
-import re
-import difflib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,211 +122,40 @@ def _title_of(item: Dict, default: str) -> str:
     return t
 
 
-# -----------------------
-# Семантические помощники
-# -----------------------
-def _cosine(a: List[float], b: List[float]) -> float:
-    # защитимся от нулевых векторов
-    if not a or not b:
+def _token_overlap_score(a: str, b: str) -> float:
+    """Возвращает нормализованное пересечение токенов двух строк (0.0–1.0)."""
+    a_tokens = set(re.findall(r'\w+', (a or "").lower()))
+    b_tokens = set(re.findall(r'\w+', (b or "").lower()))
+    if not a_tokens or not b_tokens:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+    inter = a_tokens.intersection(b_tokens)
+    return len(inter) / max(len(a_tokens), len(b_tokens))
 
 
-def _collect_candidates(device: str) -> List[Dict]:
-    nav = navigation_mobile if device == "mobile" else navigation_desktop
-    items: List[Dict] = []
-    # нормализуем элементы навигации
-    for item in nav:
-        items.append({
-            "type": "navigation",
-            "title": _title_of(item, "Навигация"),
-            "keywords": item.get("keywords", []),
-            "value": item.get("hint") or item.get("answer", "") or "",
-            "_raw": item
-        })
-    # правила
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        items.append({
-            "type": "rules",
-            "title": _title_of(rule, "Правило"),
-            "keywords": rule.get("keywords", []),
-            "value": rule.get("answer", "") or "",
-            "_raw": rule
-        })
-    return items
-
-
-def _semantic_match_with_embeddings(question: str, device: str, top_k: int = 3) -> List[Dict]:
+def search_matches(question: str, device: str) -> List[Dict]:
     """
-    Используем embeddings для ранжирования кандидатов по семантическому сходству.
-    Возвращаем топ-K совпадений (если похожесть достаточна).
+    Улучшённый поиск совпадений:
+    1) точное совпадение (высший приоритет)
+    2) вхождение keyword в вопрос
+    3) token overlap (пересечение слов)
+    4) fuzzy match (difflib) — опечатки / близкие формулировки
+    Возвращаем список объектов:
+      { "type": "navigation"|"rules", "title": "...", "value": "..."}
     """
-    if not openai_client:
-        return []
-
-    try:
-        items = _collect_candidates(device)
-        if not items:
-            return []
-
-        # Формируем тексты для эмбеддингов: title + keywords + snippet
-        texts = []
-        for it in items:
-            kws = " ".join(it.get("keywords") or [])
-            snippet = (it.get("value") or "")[:600]  # ограничим длину
-            texts.append(f"{it.get('title','')}. {kws}. {snippet}")
-
-        # Запрос batch embeddings
-        emb_model = "text-embedding-3-small"  # универсальная модель для эмбеддингов
-        resp = openai_client.embeddings.create(model=emb_model, input=[question] + texts)
-        if not resp or not getattr(resp, "data", None):
-            return []
-
-        # resp.data[0] - embedding для вопроса, остальные - для текстов
-        all_emb = [d.embedding for d in resp.data]
-        q_emb = all_emb[0]
-        item_embs = all_emb[1:]
-
-        # оценим похожесть
-        sims = []
-        for i, emb in enumerate(item_embs):
-            sim = _cosine(q_emb, emb)
-            sims.append((i, sim))
-
-        # отсортируем по убыванию похожести
-        sims.sort(key=lambda x: x[1], reverse=True)
-
-        results = []
-        for idx, sim in sims[:top_k]:
-            # порог — гибкий: берем если sim > 0.62 или если нет других
-            if sim < 0.5:
-                # слишком слабая похожесть — прерываем (низкая уверенность)
-                continue
-            it = items[idx]
-            results.append({
-                "type": it["type"],
-                "title": it["title"],
-                "value": it["value"],
-                "score": sim,
-                "_raw": it["_raw"]
-            })
-        return results
-    except Exception:
-        return []
-
-
-def _semantic_match_with_chat(question: str, device: str, top_k: int = 3) -> List[Dict]:
-    """
-    Если embeddings недоступны, используем chat-модель как "классификатор" —
-    просим вернуть номера наиболее подходящих элементов из переданного списка.
-    Возвращаем выбранные элементы.
-    """
-    if not openai_client:
-        return []
-
-    try:
-        items = _collect_candidates(device)
-        if not items:
-            return []
-
-        # Ограничим количество кандидатов, чтобы не перегрузить prompt
-        max_list = 30
-        short_items = items[:max_list]
-
-        # Сформируем список в текстовом виде
-        numbered = []
-        for i, it in enumerate(short_items, start=1):
-            kws = ", ".join(it.get("keywords") or [])
-            snippet = (it.get("value") or "")[:300]
-            numbered.append(f"{i}. {it['title']} | keywords: {kws} | snippet: {snippet}")
-
-        system = (
-            "Ты — помощник, задача которого — по вопросу пользователя выбрать наиболее релевантные элементы "
-            "из списка. Верни JSON-массив индексов (1-основной индекс в списке ниже) в порядке убывания релевантности. "
-            "Если ничего подходящего нет, верни пустой массив []. Отвечай только JSON, например: [2,5]"
-        )
-
-        user = f"Вопрос: {question}\n\nСписок элементов:\n" + "\n".join(numbered) + "\n\nВерни JSON-массив индексов."
-
-        resp = openai_client.chat.completions.create(
-            model=OPENAI_MODEL or "gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            temperature=0.0,
-            max_tokens=300,
-        )
-        if not resp or not getattr(resp, "choices", None):
-            return []
-
-        text = None
-        choice0 = resp.choices[0]
-        # совместимость со структурой ответа разного формата
-        if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-            text = choice0.message.get("content")
-        elif hasattr(choice0, "message") and hasattr(choice0.message, "get"):
-            text = choice0.message.get("content")
-        elif hasattr(choice0, "text"):
-            text = choice0.text
-
-        if not text:
-            return []
-
-        # Попробуем извлечь JSON из ответа
-        import re
-        m = re.search(r"(\[.*\])", text, re.S)
-        arr_txt = m.group(1) if m else text.strip()
-        try:
-            idxs = json.loads(arr_txt)
-            if not isinstance(idxs, list):
-                return []
-        except Exception:
-            # если не парсится — попытаться извлечь числа
-            nums = re.findall(r"\d+", text)
-            idxs = [int(x) for x in nums[:top_k]]
-
-        results = []
-        for n in idxs[:top_k]:
-            if 1 <= n <= len(short_items):
-                it = short_items[n - 1]
-                results.append({
-                    "type": it["type"],
-                    "title": it["title"],
-                    "value": it["value"],
-                    "_raw": it["_raw"]
-                })
-        return results
-    except Exception:
-        return []
-
-
-# -----------------------
-# Основной поиск совпадений
-# -----------------------
-def search_matches(question: str, device: str) -> list:
-    """Ищет совпадения вопроса пользователя с навигацией и правилами."""
     q_raw = (question or "").strip()
     q = re.sub(r'\s+', ' ', q_raw.lower())
-    
-    matches = []
-    exact_matches = []
+
+    matches: List[Dict] = []
+    exact_matches: List[Dict] = []
 
     nav = navigation_mobile if device == "mobile" else navigation_desktop
 
-    def check_item(item, item_type):
+    def check_item(item: Dict, item_type: str):
         for kw in item.get("keywords", []) or []:
-            kw_clean = re.sub(r'\s+', ' ', kw.lower().strip())
+            kw_clean = re.sub(r'\s+', ' ', (kw or "").lower().strip())
 
             # 1) Точное совпадение
-            if q == kw_clean:
+            if q == kw_clean and kw_clean:
                 exact_matches.append({
                     "type": item_type,
                     "title": _title_of(item, kw),
@@ -336,7 +164,7 @@ def search_matches(question: str, device: str) -> list:
                 return
 
             # 2) Простое вхождение ключевого слова
-            if kw_clean in q:
+            if kw_clean and kw_clean in q:
                 matches.append({
                     "type": item_type,
                     "title": _title_of(item, kw),
@@ -345,13 +173,16 @@ def search_matches(question: str, device: str) -> list:
                 return
 
             # 3) Token overlap (пересечение слов)
-            if _token_overlap_score(q, kw_clean) >= 0.5:
-                matches.append({
-                    "type": item_type,
-                    "title": _title_of(item, kw),
-                    "value": item.get("hint") or item.get("answer", "")
-                })
-                return
+            try:
+                if _token_overlap_score(q, kw_clean) >= 0.5:
+                    matches.append({
+                        "type": item_type,
+                        "title": _title_of(item, kw),
+                        "value": item.get("hint") or item.get("answer", "")
+                    })
+                    return
+            except Exception:
+                pass
 
             # 4) Fuzzy match (опечатки / близкие формулировки)
             try:
@@ -381,49 +212,15 @@ def search_matches(question: str, device: str) -> list:
         return exact_matches
 
     # Убираем дубликаты по типу и значению
-    unique = []
+    unique: List[Dict] = []
     seen = set()
     for m in matches:
-        key = (m["type"], str(m["value"]))
+        key = (m.get("type"), str(m.get("value")))
         if key not in seen:
             seen.add(key)
             unique.append(m)
 
     return unique
-
-    # -----------------------
-    # НИЖЕ: семантический поиск, если не нашли совпадений по keywords
-    # -----------------------
-    # Попробуем embeddings (если возможны) — наиболее точный и быстрый вариант
-    sem_results = []
-    try:
-        sem_results = _semantic_match_with_embeddings(q, device, top_k=3)
-    except Exception:
-        sem_results = []
-
-    # Если embeddings не дали результата, попробуем chat-фоллбек
-    if not sem_results:
-        try:
-            sem_results = _semantic_match_with_chat(q, device, top_k=3)
-        except Exception:
-            sem_results = []
-
-    # Преобразуем формат в ожидаемый (без score если нет)
-    final = []
-    seen_vals = set()
-    for r in sem_results:
-        key = (r.get("type"), str(r.get("value")))
-        if key in seen_vals:
-            continue
-        seen_vals.add(key)
-        entry = {
-            "type": r.get("type"),
-            "title": r.get("title"),
-            "value": r.get("value")
-        }
-        final.append(entry)
-
-    return final
 
 
 def parse_choice(text: str, options: List[Dict]) -> Optional[int]:
@@ -480,7 +277,6 @@ def is_off_topic(question: str) -> bool:
 
 
 def humanize_answer(short_answer: str, user_question: str) -> str:
-    # Переводим / улучшаем ответ "по-человечески" — НО сам контент берётся из базы (short_answer).
     if not openai_client:
         return short_answer
     try:
@@ -572,7 +368,6 @@ async def ask_ai(user_id: int, question: str) -> Any:
     matches = search_matches(q, device)
 
     if not matches:
-        # Если ничего не найдено — дружелюбный fallback
         return "Мне не удалось найти точный ответ в базе по этому вопросу. Пожалуйста, уточните, о чём именно идёт речь на сайте."
 
     if len(matches) == 1:
