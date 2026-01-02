@@ -14,7 +14,7 @@ router = Router()
 
 # -------------------- LIVE SUPPORT / Com100 --------------------
 # Поставь здесь ссылку на ваш Com100/страницу живой поддержки:
-LIVE_SUPPORT_URL = "https://service.q0hrjkwsg.com/chatwindow.aspx?siteId=90007884&planId=650ce14c-5a62-452e-a197-a2d60316215c#"
+LIVE_SUPPORT_URL = "https://cutt.ly/atghzvA0"
 
 # Сколько подряд "провалов" считать триггером для предложения живой поддержки
 MAX_FAILS_BEFORE_SUPPORT = 3
